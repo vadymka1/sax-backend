@@ -59,7 +59,7 @@ impl AppConfig {
             .map_err(|_| AppError::Internal("Invalid JWT_REFRESH_TTL_SECONDS".to_string()))?;
 
         let password_min_length = env::var("PASSWORD_MIN_LENGTH")
-            .unwrap_or_else(|_| "12".to_string())
+            .unwrap_or_else(|_| "6".to_string())
             .parse::<usize>()
             .map_err(|_| AppError::Internal("Invalid PASSWORD_MIN_LENGTH".to_string()))?;
 

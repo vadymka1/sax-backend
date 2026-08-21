@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use spa_sax_backend::application::dto::{
     AdminContentBlockDto, AdminMediaDto, AdminSpaSectionDto, PublicMediaDto, PublicPageResponse,
+    UserDto,
 };
 use spa_sax_backend::domain::users::Role;
 use spa_sax_backend::infrastructure::auth::PasswordService;
@@ -4030,4 +4031,373 @@ async fn test_media_service_storage_failure_compensating_delete() {
         count.0, 0,
         "Compensating DB cleanup MUST delete DB row when storage write fails"
     );
+}
+
+#[tokio::test]
+async fn test_user_update_full_lifecycle_and_validation() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let target_email = format!("update_target_{}@example.com", Uuid::new_v4().simple());
+
+    // 1. Create a target user to update
+    let create_res = harness
+        .client
+        .post("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "email": target_email,
+            "password": "TargetPassword123!",
+            "display_name": "Initial Name",
+            "role": "admin"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(create_res.status(), Status::Ok);
+    let create_body: SingleResponse<UserDto> = create_res.into_json().await.unwrap();
+    let target_id = create_body.data.id;
+
+    // 2. PATCH display_name, role, and is_active
+    let patch_res = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", target_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "display_name": "Updated Display Name",
+            "role": "super_admin",
+            "is_active": false
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(patch_res.status(), Status::Ok);
+    let patch_body: SingleResponse<UserDto> = patch_res.into_json().await.unwrap();
+    assert_eq!(patch_body.data.display_name, "Updated Display Name");
+    assert_eq!(patch_body.data.role, "super_admin");
+    assert!(!patch_body.data.is_active);
+
+    // 3. Partial PATCH (only display_name)
+    let partial_res = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", target_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "display_name": "Second Updated Name"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(partial_res.status(), Status::Ok);
+    let partial_body: SingleResponse<UserDto> = partial_res.into_json().await.unwrap();
+    assert_eq!(partial_body.data.display_name, "Second Updated Name");
+    assert_eq!(partial_body.data.role, "super_admin"); // Unchanged
+    assert!(!partial_body.data.is_active); // Unchanged
+
+    // 4. Empty payload returns 422 Validation Error
+    let empty_res = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", target_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({}))
+        .dispatch()
+        .await;
+
+    assert_eq!(empty_res.status(), Status::UnprocessableEntity);
+
+    // 5. Invalid role returns 422 Validation Error
+    let invalid_role_res = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", target_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "role": "invalid_role"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(invalid_role_res.status(), Status::UnprocessableEntity);
+
+    // 6. Unknown UUID returns 404 User Not Found
+    let random_id = Uuid::new_v4();
+    let unknown_res = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", random_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "display_name": "Ghost User"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(unknown_res.status(), Status::NotFound);
+}
+
+#[tokio::test]
+async fn test_self_deactivation_and_self_demotion_guards() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // 1. PATCH self deactivation returns 409 Conflict
+    let patch_self_deactivate = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", harness.super_admin_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "is_active": false
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(patch_self_deactivate.status(), Status::Conflict);
+
+    // 2. POST /deactivate self deactivation returns 409 Conflict
+    let post_self_deactivate = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/users/{}/deactivate",
+            harness.super_admin_id
+        ))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+
+    assert_eq!(post_self_deactivate.status(), Status::Conflict);
+
+    let second_email = format!("super_admin_2_{}@example.com", Uuid::new_v4().simple());
+
+    // 3. Create a second super_admin so super_admin count > 1
+    let second_admin_res = harness
+        .client
+        .post("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "email": second_email,
+            "password": "SuperAdminPass123!",
+            "display_name": "Second Super Admin",
+            "role": "super_admin"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(second_admin_res.status(), Status::Ok);
+
+    // 4. Self demotion to admin succeeds when active super_admin count > 1
+    let patch_self_demote = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", harness.super_admin_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "role": "admin"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(patch_self_demote.status(), Status::Ok);
+    let demote_body: SingleResponse<UserDto> = patch_self_demote.into_json().await.unwrap();
+    assert_eq!(demote_body.data.role, "admin");
+
+    // Restore super_admin role in DB for harness super_admin user fixture
+    sqlx::query("UPDATE users SET role = 'super_admin' WHERE id = $1")
+        .bind(harness.super_admin_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_super_admin_create_both_admin_and_super_admin_roles() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let admin_email = format!("role_admin_{}@example.com", Uuid::new_v4().simple());
+    let super_email = format!("role_super_{}@example.com", Uuid::new_v4().simple());
+
+    // 1. Create admin role user
+    let res_admin = harness
+        .client
+        .post("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "email": admin_email,
+            "password": "RolePass123!",
+            "display_name": "Role Admin",
+            "role": "admin"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res_admin.status(), Status::Ok);
+    let body_admin: SingleResponse<UserDto> = res_admin.into_json().await.unwrap();
+    assert_eq!(body_admin.data.role, "admin");
+
+    // 2. Create super_admin role user
+    let res_super = harness
+        .client
+        .post("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "email": super_email,
+            "password": "RolePass123!",
+            "display_name": "Role Super Admin",
+            "role": "super_admin"
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res_super.status(), Status::Ok);
+    let body_super: SingleResponse<UserDto> = res_super.into_json().await.unwrap();
+    assert_eq!(body_super.data.role, "super_admin");
+}
+
+#[tokio::test]
+async fn test_normal_admin_rejected_for_all_user_operations() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let normal_admin_email = format!("normal_admin_{}@example.com", Uuid::new_v4().simple());
+    let forbidden_create_email =
+        format!("forbidden_create_{}@example.com", Uuid::new_v4().simple());
+
+    // 1. Create a normal admin user
+    let admin_res = harness
+        .client
+        .post("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&json!({
+            "email": normal_admin_email,
+            "password": "AdminPassword123!",
+            "display_name": "Normal Admin Users",
+            "role": "admin"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(admin_res.status(), Status::Ok);
+
+    // Login as normal admin
+    let login_res = harness
+        .client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": normal_admin_email,
+            "password": "AdminPassword123!"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(login_res.status(), Status::Ok);
+    let login_body: SingleResponse<spa_sax_backend::application::dto::AuthTokensDto> =
+        login_res.into_json().await.unwrap();
+    let admin_token = login_body.data.access_token;
+
+    // 2. Normal admin GET /users -> 403 Forbidden
+    let list_res = harness
+        .client
+        .get("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(list_res.status(), Status::Forbidden);
+
+    // 3. Normal admin POST /users -> 403 Forbidden
+    let create_res = harness
+        .client
+        .post("/api/v1/admin/users")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .json(&json!({
+            "email": forbidden_create_email,
+            "password": "Password123!",
+            "display_name": "Forbidden"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(create_res.status(), Status::Forbidden);
+
+    // 4. Normal admin PATCH /users/:id -> 403 Forbidden
+    let patch_res = harness
+        .client
+        .patch(format!("/api/v1/admin/users/{}", harness.super_admin_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .json(&json!({
+            "display_name": "Hacked Name"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(patch_res.status(), Status::Forbidden);
+
+    // 5. Normal admin POST /users/:id/activate -> 403 Forbidden
+    let activate_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/users/{}/activate",
+            harness.super_admin_id
+        ))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(activate_res.status(), Status::Forbidden);
+
+    // 6. Normal admin POST /users/:id/deactivate -> 403 Forbidden
+    let deactivate_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/users/{}/deactivate",
+            harness.super_admin_id
+        ))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(deactivate_res.status(), Status::Forbidden);
 }

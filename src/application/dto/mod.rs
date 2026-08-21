@@ -16,8 +16,11 @@ pub use youtube_dto::*;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserDto {
     pub id: Uuid,
+    #[schema(example = "admin@example.com")]
     pub email: String,
+    #[schema(example = "Super Admin User")]
     pub display_name: String,
+    #[schema(example = "super_admin")]
     pub role: String,
     pub is_active: bool,
     pub last_login_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -29,24 +32,46 @@ pub struct UserDto {
 pub struct AuthTokensDto {
     pub access_token: String,
     pub refresh_token: String,
+    #[schema(example = "Bearer")]
     pub token_type: String,
+    #[schema(example = 900)]
     pub expires_in: i64,
     pub user: UserDto,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RefreshTokenDataDto {
+    pub access_token: String,
+    pub refresh_token: String,
+    #[schema(example = "Bearer")]
+    pub token_type: String,
+    #[schema(example = 900)]
+    pub expires_in: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MessageDataDto {
+    #[schema(example = "Operation completed successfully")]
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
+    #[schema(example = "admin@example.com")]
     pub email: String,
+    #[schema(example = "secretpassword")]
     pub password: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshTokenRequest {
+    #[schema(example = "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678")]
     pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LogoutRequest {
+    #[schema(example = "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678")]
     pub refresh_token: String,
 }
 
@@ -56,18 +81,28 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateUserRequest {
+    #[schema(example = "new_admin@example.com")]
     pub email: String,
+    #[schema(example = "SecurePassword123!")]
     pub password: String,
+    #[schema(example = "Jane Admin")]
     pub display_name: String,
+    /// User role: "admin" or "super_admin" (defaults to "admin")
+    #[schema(example = "admin")]
     pub role: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateUserRequest {
+    #[schema(example = "Updated Name")]
     pub display_name: Option<String>,
+    /// User role: "admin" or "super_admin"
+    #[schema(example = "admin")]
     pub role: Option<String>,
+    #[schema(example = true)]
+    pub is_active: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -94,7 +129,9 @@ pub struct ReorderRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateYoutubeMediaRequest {
+    #[schema(example = "https://www.youtube.com/watch?v=dQw4w9WgXcQ")]
     pub youtube_url: String,
+    #[schema(example = "Official Video")]
     pub title: Option<String>,
     pub caption: Option<String>,
     pub alt_text: Option<String>,

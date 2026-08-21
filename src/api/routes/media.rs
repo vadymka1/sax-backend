@@ -7,7 +7,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::api::guards::AuthenticatedUser;
-use crate::application::dto::{AdminMediaDto, CreateYoutubeMediaRequest};
+use crate::application::dto::{AdminMediaDto, CreateYoutubeMediaRequest, MessageDataDto};
 use crate::application::services::media_service::MediaService;
 use crate::config::AppConfig;
 use crate::infrastructure::storage::StorageProvider;
@@ -19,11 +19,22 @@ pub struct UploadForm<'f> {
     pub file: TempFile<'f>,
 }
 
+/// Upload media file
+///
+/// Uploads an image (JPEG, PNG, WebP) or video (MP4, WebM) file via multipart/form-data. File size limits and allowed MIME types are enforced by server configuration. Requires authenticated super_admin or admin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/media/upload",
-    responses((status = 200, body = SingleResponse<AdminMediaDto>)),
-    security(("bearer_auth" = []))
+    tag = "Media",
+    request_body(content = UploadMediaRequest, content_type = "multipart/form-data", description = "Multipart form data with file field"),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Media file uploaded successfully", body = SingleResponse<AdminMediaDto>),
+        (status = 400, description = "Unsupported media format or payload too large", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::post("/admin/media/upload", data = "<form>")]
 pub async fn upload_media(
@@ -67,12 +78,23 @@ pub async fn upload_media(
     Ok(Json(SingleResponse { data: dto }))
 }
 
+/// Register YouTube media
+///
+/// Registers YouTube video metadata and reference URL without uploading a file. Generates embed and thumbnail URLs. Requires authenticated super_admin or admin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/media/youtube",
-    request_body = CreateYoutubeMediaRequest,
-    responses((status = 200, body = SingleResponse<AdminMediaDto>)),
-    security(("bearer_auth" = []))
+    tag = "Media",
+    request_body(content = CreateYoutubeMediaRequest, description = "YouTube URL and metadata registration payload"),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "YouTube media registered successfully", body = SingleResponse<AdminMediaDto>),
+        (status = 400, description = "Invalid YouTube URL format", body = ApiErrorResponse),
+        (status = 422, description = "Validation error", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::post("/admin/media/youtube", data = "<req>")]
 pub async fn create_youtube_media(
@@ -89,11 +111,20 @@ pub async fn create_youtube_media(
     Ok(Json(SingleResponse { data: dto }))
 }
 
+/// List media assets
+///
+/// Returns all uploaded file assets and registered YouTube media references. Requires authenticated super_admin or admin.
 #[utoipa::path(
     get,
     path = "/api/v1/admin/media",
-    responses((status = 200, body = SingleResponse<Vec<AdminMediaDto>>)),
-    security(("bearer_auth" = []))
+    tag = "Media",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of media assets", body = SingleResponse<Vec<AdminMediaDto>>),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::get("/admin/media")]
 pub async fn list_media(
@@ -107,11 +138,25 @@ pub async fn list_media(
     Ok(Json(SingleResponse { data: dtos }))
 }
 
+/// Get media asset
+///
+/// Returns details of a single media asset by UUID identifier. Requires authenticated super_admin or admin.
 #[utoipa::path(
     get,
     path = "/api/v1/admin/media/{id}",
-    responses((status = 200, body = SingleResponse<AdminMediaDto>)),
-    security(("bearer_auth" = []))
+    tag = "Media",
+    params(
+        ("id" = Uuid, Path, description = "Media asset UUID identifier")
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Media asset details", body = SingleResponse<AdminMediaDto>),
+        (status = 422, description = "Invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "Media asset not found", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::get("/admin/media/<id_str>")]
 pub async fn get_media(
@@ -132,11 +177,26 @@ pub async fn get_media(
     Ok(Json(SingleResponse { data: dto }))
 }
 
+/// Delete media asset
+///
+/// Deletes an unused media asset by UUID identifier. If media is attached to content blocks, deletion is rejected with 409 Conflict. Requires authenticated super_admin or admin.
 #[utoipa::path(
     delete,
     path = "/api/v1/admin/media/{id}",
-    responses((status = 200)),
-    security(("bearer_auth" = []))
+    tag = "Media",
+    params(
+        ("id" = Uuid, Path, description = "Media asset UUID identifier")
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Media asset deleted successfully", body = SingleResponse<MessageDataDto>),
+        (status = 422, description = "Invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "Media asset not found", body = ApiErrorResponse),
+        (status = 409, description = "Conflict - Media asset is currently in use", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::delete("/admin/media/<id_str>")]
 pub async fn delete_media(
@@ -145,7 +205,7 @@ pub async fn delete_media(
     db: &State<PgPool>,
     config: &State<AppConfig>,
     storage: &State<Arc<dyn StorageProvider>>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<SingleResponse<MessageDataDto>>> {
     let id = Uuid::parse_str(id_str).map_err(|_| {
         AppError::ValidationError(vec![ApiErrorDetails {
             field: "id".to_string(),
@@ -154,7 +214,9 @@ pub async fn delete_media(
     })?;
     let service = MediaService::new(db.inner(), config.inner(), storage.inner().clone());
     service.delete_media(&auth, id).await?;
-    Ok(Json(
-        serde_json::json!({ "data": { "message": "Media asset deleted successfully" } }),
-    ))
+    Ok(Json(SingleResponse {
+        data: MessageDataDto {
+            message: "Media asset deleted successfully".to_string(),
+        },
+    }))
 }

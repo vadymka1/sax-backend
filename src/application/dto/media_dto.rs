@@ -38,3 +38,10 @@ pub enum AdminMediaDto {
 pub struct MediaResponseDto {
     pub data: AdminMediaDto,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UploadMediaRequest {
+    /// Image or video media file
+    #[schema(value_type = String, format = Binary)]
+    pub file: String,
+}

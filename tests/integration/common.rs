@@ -112,7 +112,7 @@ impl TestHarness {
             jwt_refresh_secret: "test_jwt_refresh_secret_key_min_32_bytes_123456".to_string(),
             jwt_access_ttl_seconds: 900,
             jwt_refresh_ttl_seconds: 2592000,
-            password_min_length: 12,
+            password_min_length: 6,
             cors_allowed_origins: vec![
                 "http://localhost:5173".to_string(),
                 "http://localhost:3000".to_string(),
@@ -125,6 +125,7 @@ impl TestHarness {
         });
         config.database_url = database_url;
         config.jwt_access_secret = jwt_secret.to_string();
+        config.password_min_length = 6;
         config.local_storage_path = temp_dir.path().to_string_lossy().to_string();
 
         let rocket = build_rocket(config.clone())

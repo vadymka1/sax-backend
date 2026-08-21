@@ -71,10 +71,11 @@ cargo run --bin create_admin
 | `POST` | `/api/v1/auth/refresh` | Refresh Access Token (256-bit rotation) | No |
 | `POST` | `/api/v1/auth/logout` | Revoke Refresh Token | No |
 | `GET` | `/api/v1/auth/me` | Current user profile | Bearer JWT |
-| `GET` | `/api/v1/admin/users` | List admin users | Bearer JWT |
-| `POST` | `/api/v1/admin/users` | Create new admin user | Bearer JWT |
-| `POST` | `/api/v1/admin/users/:id/activate` | Activate admin account | Bearer JWT |
-| `POST` | `/api/v1/admin/users/:id/deactivate` | Deactivate admin account | Bearer JWT |
+| `GET` | `/api/v1/admin/users` | List admin users | Bearer JWT (super_admin) |
+| `POST` | `/api/v1/admin/users` | Create new admin user (`admin` or `super_admin` role) | Bearer JWT (super_admin) |
+| `PATCH` | `/api/v1/admin/users/:id` | Update user (`display_name`, `role`, `is_active`) | Bearer JWT (super_admin) |
+| `POST` | `/api/v1/admin/users/:id/activate` | Activate admin account | Bearer JWT (super_admin) |
+| `POST` | `/api/v1/admin/users/:id/deactivate` | Deactivate admin account (self-deactivation guarded) | Bearer JWT (super_admin) |
 | `GET` | `/api/v1/admin/spa-sections` | List dynamic SPA sections | Bearer JWT |
 | `POST` | `/api/v1/admin/spa-sections` | Create dynamic SPA section | Bearer JWT |
 | `GET` | `/api/v1/admin/spa-sections/:id` | Get dynamic SPA section | Bearer JWT |
@@ -115,7 +116,31 @@ cargo run --bin create_admin
 }
 ```
 
-- **OpenAPI / Swagger UI**: `http://localhost:8000/swagger-ui` (in `development` environment).
+---
+
+## OpenAPI / Swagger
+
+OpenAPI 3.0 documentation and Swagger UI are enabled automatically when running in the development environment (`APP_ENV=development`).
+
+### Environment Configuration
+```env
+APP_ENV=development
+```
+
+### Canonical URLs
+- **Swagger UI**: [http://localhost:8000/swagger-ui/](http://localhost:8000/swagger-ui/) (Requests to `/swagger-ui` automatically redirect to `/swagger-ui/`)
+- **OpenAPI Spec (JSON)**: [http://localhost:8000/api-docs/openapi.json](http://localhost:8000/api-docs/openapi.json)
+
+### Authorization Workflow in Swagger UI
+1. Open [http://localhost:8000/swagger-ui/](http://localhost:8000/swagger-ui/) in your browser.
+2. Execute `POST /api/v1/auth/login` with your credentials (`email`, `password`).
+3. Copy the returned `access_token` string from the response JSON body.
+4. Click the **Authorize** button at the top right of the Swagger UI interface.
+5. In the `bearer_auth` modal, paste the raw access token (Swagger UI automatically prepends `Bearer `).
+6. Click **Authorize** and execute protected `/api/v1/admin/*` endpoints directly from Swagger UI.
+
+### Production Environment Policy
+When `APP_ENV != development` (e.g. `APP_ENV=production`), Swagger UI and OpenAPI JSON routes are **not mounted** for security.
 
 ---
 

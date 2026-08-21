@@ -14,11 +14,20 @@ use crate::application::services::spa_section_service::SpaSectionService;
 use crate::shared::errors::{ApiErrorDetails, AppError, AppResult};
 use crate::shared::pagination::SingleResponse;
 
+/// List SPA sections
+///
+/// Returns all SPA sections configured for the home page in display order. Requires authenticated super_admin or admin.
 #[utoipa::path(
     get,
     path = "/api/v1/admin/spa-sections",
-    responses((status = 200, body = SingleResponse<Vec<AdminSpaSectionDto>>)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of SPA sections", body = SingleResponse<Vec<AdminSpaSectionDto>>),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::get("/admin/spa-sections")]
 pub async fn list_spa_sections(
@@ -30,12 +39,22 @@ pub async fn list_spa_sections(
     Ok(Json(SingleResponse { data: sections }))
 }
 
+/// Create SPA section
+///
+/// Creates a new dynamic SPA section for the home page. Automatically generates a unique slug section key. Requires authenticated super_admin or admin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/spa-sections",
-    request_body = CreateSpaSectionRequest,
-    responses((status = 201, body = SingleResponse<AdminSpaSectionDto>)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    request_body(content = CreateSpaSectionRequest, description = "SPA section creation payload"),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "SPA section created successfully", body = SingleResponse<AdminSpaSectionDto>),
+        (status = 422, description = "Validation error", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::post("/admin/spa-sections", data = "<req>")]
 pub async fn create_spa_section(
@@ -48,11 +67,25 @@ pub async fn create_spa_section(
     Ok((Status::Created, Json(SingleResponse { data: dto })))
 }
 
+/// Get SPA section
+///
+/// Returns details of a single SPA section by UUID identifier. Requires authenticated super_admin or admin.
 #[utoipa::path(
     get,
     path = "/api/v1/admin/spa-sections/{id}",
-    responses((status = 200, body = SingleResponse<AdminSpaSectionDto>)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    params(
+        ("id" = Uuid, Path, description = "SPA section UUID identifier")
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "SPA section details", body = SingleResponse<AdminSpaSectionDto>),
+        (status = 422, description = "Invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "SPA section not found", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::get("/admin/spa-sections/<id_str>")]
 pub async fn get_spa_section(
@@ -71,12 +104,26 @@ pub async fn get_spa_section(
     Ok(Json(SingleResponse { data: section }))
 }
 
+/// Update SPA section
+///
+/// Updates title, navigation label, or visibility status of a SPA section. Note that section key remains immutable after creation. Requires authenticated super_admin or admin.
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/spa-sections/{id}",
-    request_body = UpdateSpaSectionRequest,
-    responses((status = 200, body = SingleResponse<AdminSpaSectionDto>)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    params(
+        ("id" = Uuid, Path, description = "SPA section UUID identifier")
+    ),
+    request_body(content = UpdateSpaSectionRequest, description = "SPA section update payload"),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "SPA section updated successfully", body = SingleResponse<AdminSpaSectionDto>),
+        (status = 422, description = "Validation error", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "SPA section not found", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::patch("/admin/spa-sections/<id_str>", data = "<req>")]
 pub async fn update_spa_section(
@@ -96,11 +143,25 @@ pub async fn update_spa_section(
     Ok(Json(SingleResponse { data: updated }))
 }
 
+/// Delete SPA section
+///
+/// Soft deletes an empty SPA section by UUID identifier. Requires authenticated super_admin or admin.
 #[utoipa::path(
     delete,
     path = "/api/v1/admin/spa-sections/{id}",
-    responses((status = 200)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    params(
+        ("id" = Uuid, Path, description = "SPA section UUID identifier")
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "SPA section deleted successfully"),
+        (status = 422, description = "Invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "SPA section not found", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::delete("/admin/spa-sections/<id_str>")]
 pub async fn delete_spa_section(
@@ -119,12 +180,22 @@ pub async fn delete_spa_section(
     Ok(Status::Ok)
 }
 
+/// Reorder SPA sections
+///
+/// Updates display sort order of SPA sections. Provided sort orders are authoritative. Requires authenticated super_admin or admin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/spa-sections/reorder",
-    request_body = ReorderSpaSectionsRequest,
-    responses((status = 200)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    request_body(content = ReorderSpaSectionsRequest, description = "Reorder items array containing section IDs and sort orders"),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "SPA sections reordered successfully"),
+        (status = 422, description = "Validation error", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::post("/admin/spa-sections/reorder", data = "<req>")]
 pub async fn reorder_spa_sections(
@@ -137,12 +208,25 @@ pub async fn reorder_spa_sections(
     Ok(Status::Ok)
 }
 
+/// Reorder section content blocks
+///
+/// Per-section transactional reordering of content blocks within a specific target SPA section. Requires authenticated super_admin or admin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/spa-sections/{spa_section_id}/content-blocks/reorder",
-    request_body = ReorderContentBlocksRequest,
-    responses((status = 200)),
-    security(("bearer_auth" = []))
+    tag = "SPA Sections",
+    params(
+        ("spa_section_id" = Uuid, Path, description = "Target SPA section UUID identifier")
+    ),
+    request_body(content = ReorderContentBlocksRequest, description = "Reorder items array containing block IDs and sort orders"),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Section content blocks reordered successfully"),
+        (status = 422, description = "Validation error or invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
 )]
 #[rocket::post(
     "/admin/spa-sections/<section_id_str>/content-blocks/reorder",

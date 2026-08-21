@@ -1,0 +1,72 @@
+name: CI & Quality Gate
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_ENV: test
+  DATABASE_URL: postgres://app:app_password@localhost:5432/app_test
+  JWT_ACCESS_SECRET: test_jwt_access_secret_key_min_32_bytes_123456
+  JWT_REFRESH_SECRET: test_jwt_refresh_secret_key_min_32_bytes_123456
+  LOCAL_STORAGE_PATH: /tmp/spa-sax-test-uploads
+  PUBLIC_MEDIA_BASE_URL: http://localhost:8000/uploads
+  CORS_ALLOWED_ORIGINS: http://localhost:5173,http://localhost:3000
+
+jobs:
+  quality-gate:
+    name: Code Quality & Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: app_test
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Cargo Check
+        run: cargo check --all-targets
+
+      - name: Clippy Check
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run Database Migrations
+        run: cargo run --bin migrate
+
+      - name: Run Tests
+        run: cargo test --all-targets
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Validate Docker Compose Config
+        run: docker compose config
+
+      - name: Docker Build Check
+        run: docker build -t spa-sax-backend:ci .

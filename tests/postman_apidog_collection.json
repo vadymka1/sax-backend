@@ -1,0 +1,315 @@
+{
+	"info": {
+		"_postman_id": "817858bc-1e38-4068-b4a3-5b49420f0b8a",
+		"name": "SPA Sax Backend API Test Suite",
+		"description": "Comprehensive Postman & Apidog test collection covering Authentication, RBAC, User Management, Public aggregated page response, and Health checks.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8000",
+			"type": "string"
+		},
+		{
+			"key": "accessToken",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "refreshToken",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "1. Health Checks",
+			"item": [
+				{
+					"name": "Health Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/health",
+							"host": ["{{baseUrl}}"],
+							"path": ["health"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+									"pm.test('Status is ok', function () { var jsonData = pm.response.json(); pm.expect(jsonData.status).to.eql('ok'); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Readiness Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/health/ready",
+							"host": ["{{baseUrl}}"],
+							"path": ["health", "ready"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+									"pm.test('Database check is ok', function () { var jsonData = pm.response.json(); pm.expect(jsonData.checks.database).to.eql('ok'); });"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "2. Authentication",
+			"item": [
+				{
+					"name": "Login - Super Admin Success",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"superadmin@example.com\",\n  \"password\": \"SuperPassword123!\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "login"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Contains access and refresh tokens', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.access_token).to.be.a('string');",
+									"    pm.expect(jsonData.data.refresh_token).to.be.a('string');",
+									"    pm.collectionVariables.set('accessToken', jsonData.data.access_token);",
+									"    pm.collectionVariables.set('refreshToken', jsonData.data.refresh_token);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Login - Invalid Credentials",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"superadmin@example.com\",\n  \"password\": \"WrongPassword!\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "login"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 401 Unauthorized', function () { pm.response.to.have.status(401); });",
+									"pm.test('Error code is INVALID_CREDENTIALS', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.error.code).to.eql('INVALID_CREDENTIALS');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Refresh Token Rotation",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"{{refreshToken}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/refresh",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "refresh"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Returns new token pair', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.access_token).to.be.a('string');",
+									"    pm.collectionVariables.set('accessToken', jsonData.data.access_token);",
+									"    pm.collectionVariables.set('refreshToken', jsonData.data.refresh_token);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "3. Admin User Management",
+			"item": [
+				{
+					"name": "List Users (Admin Auth)",
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}"
+							}
+						],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/admin/users?page=1&page_size=10",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "admin", "users"],
+							"query": [
+								{ "key": "page", "value": "1" },
+								{ "key": "page_size", "value": "10" }
+							]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Returns list of users with pagination metadata', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data).to.be.an('array');",
+									"    pm.expect(jsonData.meta.page).to.eql(1);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Create User - Success",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"neweditor@example.com\",\n  \"password\": \"EditorSecret123!\",\n  \"display_name\": \"New Assistant Editor\",\n  \"role\": \"editor\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/admin/users",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "admin", "users"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('User created with correct role', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.email).to.eql('neweditor@example.com');",
+									"    pm.expect(jsonData.data.role).to.eql('editor');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "4. Public Website API",
+			"item": [
+				{
+					"name": "Get Aggregated Public Home Page",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/public/page",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "public", "page"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Returns site, page, sections, and social links', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.page.slug).to.eql('home');",
+									"    pm.expect(jsonData.data.sections).to.be.an('array');",
+									"    pm.expect(jsonData.data.social_links).to.be.an('array');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

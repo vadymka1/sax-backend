@@ -1,0 +1,48 @@
+services:
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.example}
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - ${ENV_FILE:-.env.example}
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads_data:/app/uploads
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: app_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  uploads_data:

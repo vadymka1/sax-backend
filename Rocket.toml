@@ -1,0 +1,16 @@
+[default]
+address = "0.0.0.0"
+port = 8000
+
+# Transport limits must exceed MAX_VIDEO_UPLOAD_MB (100MB) plus multipart form headers overhead
+[default.limits]
+file = "115MiB"
+form = "115MiB"
+data-form = "115MiB"
+json = "10MiB"
+
+[development]
+log_level = "normal"
+
+[production]
+log_level = "critical"

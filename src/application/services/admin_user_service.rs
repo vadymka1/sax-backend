@@ -3,7 +3,7 @@ use uuid::Uuid;
 use validator::ValidateEmail;
 
 use crate::api::guards::AuthenticatedUser;
-use crate::application::dto::{CreateUserRequest, UserDto};
+use crate::application::dto::{CreateUserRequest, UpdateUserRequest, UserDto};
 use crate::config::AppConfig;
 use crate::domain::users::{Role, User};
 use crate::infrastructure::auth::PasswordService;
@@ -143,10 +143,12 @@ impl<'a> AdminUserService<'a> {
         let target_role = match req.role {
             Some(ref r) => match Role::parse(r) {
                 Some(Role::Admin) => Role::Admin,
+                Some(Role::SuperAdmin) => Role::SuperAdmin,
                 _ => {
                     errors.push(ApiErrorDetails {
                         field: "role".to_string(),
-                        message: "Only 'admin' role is accepted for this endpoint".to_string(),
+                        message: "Invalid role value. Accepted roles are 'admin' and 'super_admin'"
+                            .to_string(),
                     });
                     Role::Admin
                 }
@@ -255,7 +257,7 @@ impl<'a> AdminUserService<'a> {
         // Protect last active super admin from deactivation
         if target_role == Role::SuperAdmin && !is_active {
             let active_super_admins: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM users WHERE role = 'super_admin' AND is_active = TRUE AND deleted_at IS NULL"
+                "SELECT COUNT(*) FROM users WHERE role = 'super_admin' AND is_active = TRUE",
             )
             .fetch_one(&mut *tx)
             .await
@@ -283,5 +285,151 @@ impl<'a> AdminUserService<'a> {
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub async fn update_user(
+        &self,
+        auth: &AuthenticatedUser,
+        id: Uuid,
+        req: UpdateUserRequest,
+    ) -> AppResult<UserDto> {
+        if !auth.role.can_manage_users() {
+            return Err(AppError::Forbidden);
+        }
+
+        if req.display_name.is_none() && req.role.is_none() && req.is_active.is_none() {
+            return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                field: "root".to_string(),
+                message:
+                    "At least one field (display_name, role, is_active) must be provided for update"
+                        .to_string(),
+            }]));
+        }
+
+        let mut errors = Vec::new();
+
+        let parsed_display_name = match req.display_name {
+            Some(ref name) => {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    errors.push(ApiErrorDetails {
+                        field: "display_name".to_string(),
+                        message: "Display name cannot be empty".to_string(),
+                    });
+                    None
+                } else if trimmed.len() < 2 || trimmed.len() > 100 {
+                    errors.push(ApiErrorDetails {
+                        field: "display_name".to_string(),
+                        message: "Display name must be between 2 and 100 characters".to_string(),
+                    });
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            None => None,
+        };
+
+        let parsed_role = match req.role {
+            Some(ref r) => match Role::parse(r) {
+                Some(role) => Some(role),
+                None => {
+                    errors.push(ApiErrorDetails {
+                        field: "role".to_string(),
+                        message: "Invalid role value. Accepted roles are 'admin' and 'super_admin'"
+                            .to_string(),
+                    });
+                    None
+                }
+            },
+            None => None,
+        };
+
+        if !errors.is_empty() {
+            return Err(AppError::ValidationError(errors));
+        }
+
+        // Self-deactivation guard
+        if auth.id == id && req.is_active == Some(false) {
+            return Err(AppError::ResourceConflict(
+                "You cannot deactivate your own account".to_string(),
+            ));
+        }
+
+        let mut tx: Transaction<'_, Postgres> = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let target_user = sqlx::query_as::<_, User>(
+            "SELECT id, email, password_hash, display_name, role, is_active, last_login_at, created_at, updated_at, created_by FROM users WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?
+        .ok_or(AppError::UserNotFound)?;
+
+        let current_role = target_user.get_role();
+        let target_is_active = req.is_active.unwrap_or(target_user.is_active);
+        let target_role_val = parsed_role.unwrap_or(current_role);
+
+        // Protect last active super_admin from deactivation or demotion
+        if current_role == Role::SuperAdmin
+            && (!target_is_active || target_role_val != Role::SuperAdmin)
+        {
+            let active_super_admins: (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM users WHERE role = 'super_admin' AND is_active = TRUE",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+            if active_super_admins.0 <= 1 {
+                let _ = tx.rollback().await;
+                return Err(AppError::ResourceConflict(
+                    "Cannot demote or deactivate the last active super_admin account".to_string(),
+                ));
+            }
+        }
+
+        let display_name_str = parsed_display_name.as_deref();
+        let role_str = parsed_role.map(|r| r.as_str().to_string());
+
+        let updated_user = sqlx::query_as::<_, User>(
+            r#"
+            UPDATE users
+            SET
+                display_name = COALESCE($1, display_name),
+                role = COALESCE($2, role),
+                is_active = COALESCE($3, is_active),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $4
+            RETURNING id, email, password_hash, display_name, role, is_active, last_login_at, created_at, updated_at, created_by
+            "#
+        )
+        .bind(display_name_str)
+        .bind(role_str)
+        .bind(req.is_active)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok(UserDto {
+            id: updated_user.id,
+            email: updated_user.email,
+            display_name: updated_user.display_name,
+            role: updated_user.role,
+            is_active: updated_user.is_active,
+            last_login_at: updated_user.last_login_at,
+            created_at: updated_user.created_at,
+            updated_at: updated_user.updated_at,
+        })
     }
 }

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     SuperAdmin,
     Admin,
@@ -44,7 +46,7 @@ impl Role {
 
     pub fn can_create_role(&self, target: Role) -> bool {
         match self {
-            Role::SuperAdmin => target == Role::Admin,
+            Role::SuperAdmin => matches!(target, Role::Admin | Role::SuperAdmin),
             _ => false,
         }
     }

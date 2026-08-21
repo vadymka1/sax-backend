@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rocket::fs::FileServer;
+use rocket::response::Redirect;
 use rocket::{catchers, routes, Build, Rocket};
 use sqlx::postgres::PgPoolOptions;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -31,8 +32,17 @@ impl Modify for SecurityAddon {
     }
 }
 
+#[rocket::get("/swagger-ui", rank = 10)]
+fn swagger_ui_redirect() -> Redirect {
+    Redirect::to("/swagger-ui/")
+}
+
 #[derive(OpenApi)]
 #[openapi(
+    info(
+        title = "SPA Sax Backend API",
+        description = "Backend API for the SPA Sax public website and protected administration interface. Supports public aggregated page query, JWT Bearer authentication, SPA sections management, home page content blocks CRUD, local file uploads & YouTube media references, super-admin user management, and health checks."
+    ),
     paths(
         routes::health::health_check,
         routes::health::liveness_check,
@@ -43,6 +53,7 @@ impl Modify for SecurityAddon {
         routes::auth::get_me,
         routes::users::list_users,
         routes::users::create_user,
+        routes::users::update_user,
         routes::users::activate_user,
         routes::users::deactivate_user,
         routes::content_blocks::list_content_blocks,
@@ -70,8 +81,11 @@ impl Modify for SecurityAddon {
             dto::RefreshTokenRequest,
             dto::LogoutRequest,
             dto::AuthTokensDto,
+            dto::RefreshTokenDataDto,
+            dto::MessageDataDto,
             dto::UserDto,
             dto::CreateUserRequest,
+            dto::UpdateUserRequest,
             dto::AdminSpaSectionDto,
             dto::CreateSpaSectionRequest,
             dto::UpdateSpaSectionRequest,
@@ -83,13 +97,21 @@ impl Modify for SecurityAddon {
             dto::ReorderContentBlockItem,
             dto::ReorderContentBlocksRequest,
             dto::MediaResponseDto,
+            dto::AdminMediaDto,
             dto::CreateYoutubeMediaRequest,
             dto::YoutubeMediaResponseDto,
+            dto::UploadMediaRequest,
             dto::PublicPageResponse,
             dto::PublicPageDto,
             dto::PublicSpaSectionDto,
             dto::PublicContentBlockDto,
             dto::PublicMediaDto,
+            routes::health::HealthStatusDto,
+            routes::health::ReadinessStatusDto,
+            routes::health::ReadinessCheckDetails,
+            crate::domain::users::Role,
+            crate::domain::sections::ContentBlockType,
+            crate::shared::pagination::PaginationMeta,
             crate::shared::errors::ApiErrorPayload,
             crate::shared::errors::ApiErrorDetails,
             crate::shared::errors::ApiErrorResponse
@@ -148,6 +170,7 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
                 routes::auth::get_me,
                 routes::users::list_users,
                 routes::users::create_user,
+                routes::users::update_user,
                 routes::users::activate_user,
                 routes::users::deactivate_user,
                 routes::spa_sections::list_spa_sections,
@@ -180,12 +203,16 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
         )
         .mount("/uploads", FileServer::from(&config.local_storage_path));
 
-    if config.env == "development" {
-        Ok(rocket.mount(
-            "/swagger-ui",
+    Ok(mount_swagger(rocket, &config.env))
+}
+
+pub fn mount_swagger(rocket: Rocket<Build>, env: &str) -> Rocket<Build> {
+    if env == "development" {
+        rocket.mount("/", routes![swagger_ui_redirect]).mount(
+            "/",
             SwaggerUi::new("/swagger-ui/<_..>").url("/api-docs/openapi.json", ApiDoc::openapi()),
-        ))
+        )
     } else {
-        Ok(rocket)
+        rocket
     }
 }

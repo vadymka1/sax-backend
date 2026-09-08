@@ -8,7 +8,7 @@ use crate::application::dto::{
     PublicContentBlockDto, PublicMediaDto, PublicPageDto, PublicPageResponse, PublicSpaSectionDto,
 };
 use crate::domain::media::YoutubeUrlParser;
-use crate::domain::sections::ContentBlockType;
+use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 use crate::infrastructure::storage::StorageProvider;
 use crate::shared::errors::{AppError, AppResult};
 
@@ -54,6 +54,8 @@ impl PublicPageService {
             section_type: String,
             title: Option<String>,
             content: serde_json::Value,
+            font_family: String,
+            font_size: String,
             sort_order: i32,
             media_id: Option<Uuid>,
             media_type: Option<String>,
@@ -61,6 +63,8 @@ impl PublicPageService {
             mime_type: Option<String>,
             alt_text: Option<String>,
             youtube_video_id: Option<String>,
+            #[allow(dead_code)]
+            media_sort_order: Option<i32>,
         }
 
         // Query 1: Bounded query for home page metadata
@@ -125,13 +129,16 @@ impl PublicPageService {
                 s.section_type,
                 s.title,
                 s.content,
+                s.font_family,
+                s.font_size,
                 s.sort_order,
                 m.id AS media_id,
                 m.media_type,
                 m.storage_key,
                 m.mime_type,
                 m.alt_text,
-                m.youtube_video_id
+                m.youtube_video_id,
+                sm.sort_order AS media_sort_order
             FROM sections s
             JOIN spa_sections ss ON ss.id = s.spa_section_id AND ss.page_id = s.page_id
             LEFT JOIN section_media sm ON s.id = sm.section_id
@@ -141,7 +148,7 @@ impl PublicPageService {
               AND ss.is_visible = TRUE
               AND s.deleted_at IS NULL
               AND s.is_visible = TRUE
-            ORDER BY ss.sort_order ASC, ss.id ASC, s.sort_order ASC, s.id ASC
+            ORDER BY ss.sort_order ASC, ss.id ASC, s.sort_order ASC, s.id ASC, sm.sort_order ASC, sm.created_at ASC, sm.id ASC
             "#
         )
         .bind(page_row.id)
@@ -149,159 +156,172 @@ impl PublicPageService {
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        // Efficient Rust O(N) grouping using section_index_map without N+1 queries
+        // In-memory grouping: block_id -> (sec_idx, block_idx)
+        let mut block_index_map: HashMap<Uuid, (usize, usize)> = HashMap::new();
+
         for row in joined_rows {
             let sec_idx = match section_index_map.get(&row.spa_section_id) {
                 Some(&idx) => idx,
                 None => continue,
             };
 
-            let block_type = match ContentBlockType::parse(&row.section_type) {
-                Some(bt) => bt,
+            let block_location = match block_index_map.get(&row.block_id) {
+                Some(&loc) => loc,
                 None => {
-                    tracing::warn!(
-                        "Skipping invalid public content block {}: unsupported block type {}",
-                        row.block_id,
-                        row.section_type
-                    );
-                    continue;
+                    let block_type = match ContentBlockType::parse(&row.section_type) {
+                        Some(bt) => bt,
+                        None => {
+                            tracing::warn!(
+                                "Skipping invalid public content block {}: unsupported block type {}",
+                                row.block_id,
+                                row.section_type
+                            );
+                            continue;
+                        }
+                    };
+
+                    let text = row
+                        .content
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let font_family =
+                        FontFamily::parse(&row.font_family).unwrap_or(FontFamily::Sans);
+                    let font_size = FontSize::parse(&row.font_size).unwrap_or(FontSize::Md);
+
+                    let b_idx = sections[sec_idx].blocks.len();
+                    sections[sec_idx].blocks.push(PublicContentBlockDto {
+                        id: row.block_id,
+                        block_type,
+                        title: row.title,
+                        text,
+                        media: Vec::new(),
+                        font_family,
+                        font_size,
+                        sort_order: row.sort_order,
+                    });
+                    block_index_map.insert(row.block_id, (sec_idx, b_idx));
+                    (sec_idx, b_idx)
                 }
             };
 
-            let text = row
-                .content
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let media = match block_type {
-                ContentBlockType::Text => {
-                    if row.media_id.is_some() {
-                        tracing::warn!(
-                            "Skipping malformed text block {}: text block has media asset attached",
-                            row.block_id
-                        );
-                        continue;
+            if let Some(mid) = row.media_id {
+                let m_type = row.media_type.as_deref().unwrap_or_default();
+                let public_media = match m_type {
+                    "image" => {
+                        let key = match row.storage_key.as_deref() {
+                            Some(k) if !k.trim().is_empty() => k.trim(),
+                            _ => {
+                                tracing::warn!(
+                                    "Skipping malformed image media {}: missing or empty storage key",
+                                    mid
+                                );
+                                continue;
+                            }
+                        };
+                        let url = self.storage.get_public_url(key);
+                        PublicMediaDto::Image {
+                            id: mid,
+                            url,
+                            alt_text: row.alt_text,
+                        }
                     }
-                    None
+                    "video" => {
+                        let key = match row.storage_key.as_deref() {
+                            Some(k) if !k.trim().is_empty() => k.trim(),
+                            _ => {
+                                tracing::warn!(
+                                    "Skipping malformed video media {}: missing or empty storage key",
+                                    mid
+                                );
+                                continue;
+                            }
+                        };
+                        let url = self.storage.get_public_url(key);
+                        PublicMediaDto::Video {
+                            id: mid,
+                            url,
+                            mime_type: row.mime_type,
+                        }
+                    }
+                    "youtube" => {
+                        let yid = match row.youtube_video_id {
+                            Some(ref id) if !id.trim().is_empty() => id.trim().to_string(),
+                            _ => {
+                                tracing::warn!(
+                                    "Skipping malformed youtube media {}: missing video ID",
+                                    mid
+                                );
+                                continue;
+                            }
+                        };
+                        let embed_url = YoutubeUrlParser::build_embed_url(&yid);
+                        let thumbnail_url = YoutubeUrlParser::build_thumbnail_url(&yid);
+                        PublicMediaDto::Youtube {
+                            id: mid,
+                            youtube_video_id: yid,
+                            embed_url,
+                            thumbnail_url,
+                        }
+                    }
+                    _ => continue,
+                };
+
+                sections[block_location.0].blocks[block_location.1]
+                    .media
+                    .push(public_media);
+            }
+        }
+
+        // Post-validation filter: eliminate blocks that violate type constraints
+        for sec in &mut sections {
+            sec.blocks.retain(|block| match block.block_type {
+                ContentBlockType::Text => {
+                    if !block.media.is_empty() {
+                        tracing::warn!(
+                            "Filtered malformed text block {}: has media attached",
+                            block.id
+                        );
+                        false
+                    } else {
+                        true
+                    }
                 }
                 ContentBlockType::TextImage => {
-                    let mid = match row.media_id {
-                        Some(id) => id,
-                        None => {
-                            tracing::warn!(
-                                "Skipping malformed text_image block {}: missing media asset",
-                                row.block_id
-                            );
-                            continue;
-                        }
-                    };
-                    if row.media_type.as_deref() != Some("image") {
+                    if block.media.is_empty() {
                         tracing::warn!(
-                            "Skipping malformed text_image block {}: media asset is not an image",
-                            row.block_id
+                            "Filtered malformed text_image block {}: missing image media",
+                            block.id
                         );
-                        continue;
+                        false
+                    } else {
+                        true
                     }
-                    let key = match row.storage_key.as_deref() {
-                        Some(k) if !k.trim().is_empty() => k.trim(),
-                        _ => {
-                            tracing::warn!(
-                                "Skipping malformed image block {}: missing or empty storage key",
-                                row.block_id
-                            );
-                            continue;
-                        }
-                    };
-                    let url = self.storage.get_public_url(key);
-                    Some(PublicMediaDto::Image {
-                        id: mid,
-                        url,
-                        alt_text: row.alt_text,
-                    })
                 }
                 ContentBlockType::TextVideo => {
-                    let mid = match row.media_id {
-                        Some(id) => id,
-                        None => {
-                            tracing::warn!(
-                                "Skipping malformed text_video block {}: missing media asset",
-                                row.block_id
-                            );
-                            continue;
-                        }
-                    };
-                    if row.media_type.as_deref() != Some("video") {
+                    if block.media.is_empty() {
                         tracing::warn!(
-                            "Skipping malformed text_video block {}: media asset is not a video",
-                            row.block_id
+                            "Filtered malformed text_video block {}: missing video media",
+                            block.id
                         );
-                        continue;
+                        false
+                    } else {
+                        true
                     }
-                    let key = match row.storage_key.as_deref() {
-                        Some(k) if !k.trim().is_empty() => k.trim(),
-                        _ => {
-                            tracing::warn!(
-                                "Skipping malformed video block {}: missing or empty storage key",
-                                row.block_id
-                            );
-                            continue;
-                        }
-                    };
-                    let url = self.storage.get_public_url(key);
-                    Some(PublicMediaDto::Video {
-                        id: mid,
-                        url,
-                        mime_type: row.mime_type,
-                    })
                 }
                 ContentBlockType::TextYoutube => {
-                    let mid = match row.media_id {
-                        Some(id) => id,
-                        None => {
-                            tracing::warn!(
-                                "Skipping malformed text_youtube block {}: missing media asset",
-                                row.block_id
-                            );
-                            continue;
-                        }
-                    };
-                    if row.media_type.as_deref() != Some("youtube") {
+                    if block.media.is_empty() {
                         tracing::warn!(
-                            "Skipping malformed text_youtube block {}: media asset is not youtube",
-                            row.block_id
+                            "Filtered malformed text_youtube block {}: missing youtube media",
+                            block.id
                         );
-                        continue;
+                        false
+                    } else {
+                        true
                     }
-                    let yid = match row.youtube_video_id {
-                        Some(ref id) if !id.trim().is_empty() => id.trim().to_string(),
-                        _ => {
-                            tracing::warn!(
-                                "Skipping malformed youtube block {}: missing or empty video ID",
-                                row.block_id
-                            );
-                            continue;
-                        }
-                    };
-                    let embed_url = YoutubeUrlParser::build_embed_url(&yid);
-                    let thumbnail_url = YoutubeUrlParser::build_thumbnail_url(&yid);
-                    Some(PublicMediaDto::Youtube {
-                        id: mid,
-                        youtube_video_id: yid,
-                        embed_url,
-                        thumbnail_url,
-                    })
                 }
-            };
-
-            sections[sec_idx].blocks.push(PublicContentBlockDto {
-                id: row.block_id,
-                block_type,
-                title: row.title,
-                text,
-                media,
-                sort_order: row.sort_order,
             });
         }
 

@@ -37,7 +37,7 @@ async fn test_home_page_migration_exists() {
         .list_for_page(page.0)
         .await
         .expect("Failed to list SPA sections");
-    assert_eq!(spa_sections.len(), 5);
+    assert_eq!(spa_sections.len(), 6);
 
     let keys: Vec<&str> = spa_sections
         .iter()
@@ -47,15 +47,16 @@ async fn test_home_page_migration_exists() {
         keys,
         vec![
             "about-us",
-            "our-works",
-            "festivals",
             "gallery",
-            "contact-us"
+            "contact-us",
+            "testimonials",
+            "our-works",
+            "festivals"
         ]
     );
 
     let orders: Vec<i32> = spa_sections.iter().map(|s| s.sort_order).collect();
-    assert_eq!(orders, vec![10, 20, 30, 40, 50]);
+    assert_eq!(orders, vec![10, 20, 30, 40, 50, 60]);
 
     // 2. Verify find_by_key works
     let about_sec = repo
@@ -336,11 +337,20 @@ async fn test_one_media_per_block_constraint_database_integrity() {
         .await
         .expect("First section_media insert failed");
 
-    // Second relation on same section_id MUST fail with unique constraint violation (23505)
-    let res = sqlx::query("INSERT INTO section_media (id, section_id, media_asset_id, usage_type) VALUES ($1, $2, $3, 'content')")
+    // Second relation with media2_id SUCCEEDS (multi-media allowed)
+    sqlx::query("INSERT INTO section_media (id, section_id, media_asset_id, usage_type) VALUES ($1, $2, $3, 'content')")
         .bind(uuid::Uuid::new_v4())
         .bind(section_id)
         .bind(media2_id)
+        .execute(&harness.pool)
+        .await
+        .expect("Second section_media insert with different asset should succeed");
+
+    // Duplicate relation with media1_id on same section_id MUST fail with unique constraint violation (23505)
+    let res = sqlx::query("INSERT INTO section_media (id, section_id, media_asset_id, usage_type) VALUES ($1, $2, $3, 'content')")
+        .bind(uuid::Uuid::new_v4())
+        .bind(section_id)
+        .bind(media1_id)
         .execute(&harness.pool)
         .await;
 
@@ -487,6 +497,9 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
         title: Some("Cross Page Block".to_string()),
         text: "Cross page attempt text".to_string(),
         media_id: None,
+        media_ids: None,
+        font_family: None,
+        font_size: None,
         is_visible: Some(true),
     };
 
@@ -503,6 +516,9 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
         title: Some("Valid Home Block".to_string()),
         text: "Valid home text".to_string(),
         media_id: None,
+        media_ids: None,
+        font_family: None,
+        font_size: None,
         is_visible: Some(true),
     };
 
@@ -518,6 +534,9 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
         title: Some("Updated Title Attempt".to_string()),
         text: Some("Updated text attempt".to_string()),
         media_id: None,
+        media_ids: None,
+        font_family: None,
+        font_size: None,
         is_visible: None,
     };
 
@@ -583,6 +602,9 @@ async fn test_deterministic_content_block_ordering() {
                 title: Some("Block 1".to_string()),
                 text: "Text 1".to_string(),
                 media_id: None,
+                media_ids: None,
+                font_family: None,
+                font_size: None,
                 is_visible: Some(true),
             },
         )
@@ -598,6 +620,9 @@ async fn test_deterministic_content_block_ordering() {
                 title: Some("Block 2".to_string()),
                 text: "Text 2".to_string(),
                 media_id: None,
+                media_ids: None,
+                font_family: None,
+                font_size: None,
                 is_visible: Some(true),
             },
         )
@@ -613,6 +638,9 @@ async fn test_deterministic_content_block_ordering() {
                 title: Some("Block 3".to_string()),
                 text: "Text 3".to_string(),
                 media_id: None,
+                media_ids: None,
+                font_family: None,
+                font_size: None,
                 is_visible: Some(true),
             },
         )
@@ -878,6 +906,9 @@ async fn test_admin_spa_sections_full_lifecycle() {
                 title: Some("Award Block".to_string()),
                 text: "Award content".to_string(),
                 media_id: None,
+                media_ids: None,
+                font_family: None,
+                font_size: None,
                 is_visible: Some(true),
             },
         )
@@ -954,7 +985,7 @@ async fn test_admin_spa_sections_full_lifecycle() {
     let list_body: SingleResponse<Vec<spa_sax_backend::application::dto::AdminSpaSectionDto>> =
         list_res.into_json().await.unwrap();
     let initial_items = list_body.data;
-    assert_eq!(initial_items.len(), 5, "Step 7: initial items count failed");
+    assert_eq!(initial_items.len(), 6, "Step 7: initial items count failed");
 
     let mut reorder_payload = Vec::new();
     for (idx, item) in initial_items.iter().enumerate() {
@@ -1041,8 +1072,8 @@ async fn test_post_suite_home_bootstrap_verification() {
 
     assert_eq!(
         spa_sections.len(),
-        5,
-        "Home page must contain exactly 5 SPA sections"
+        6,
+        "Home page must contain exactly 6 SPA sections"
     );
 
     let keys: Vec<&str> = spa_sections
@@ -1053,15 +1084,16 @@ async fn test_post_suite_home_bootstrap_verification() {
         keys,
         vec![
             "about-us",
-            "our-works",
-            "festivals",
             "gallery",
-            "contact-us"
+            "contact-us",
+            "testimonials",
+            "our-works",
+            "festivals"
         ]
     );
 
     let orders: Vec<i32> = spa_sections.iter().map(|s| s.sort_order).collect();
-    assert_eq!(orders, vec![10, 20, 30, 40, 50]);
+    assert_eq!(orders, vec![10, 20, 30, 40, 50, 60]);
 }
 
 #[tokio::test]
@@ -1169,6 +1201,9 @@ async fn test_concurrent_delete_vs_content_block_create() {
                 is_visible: Some(true),
                 spa_section_id: sec_id,
                 media_id: None,
+                media_ids: None,
+                font_family: None,
+                font_size: None,
             }
         )
     );
@@ -2009,6 +2044,9 @@ async fn test_concurrent_content_block_creation_same_section() {
         title: Some("Block 1".to_string()),
         text: "Text 1".to_string(),
         media_id: None,
+        media_ids: None,
+        font_family: None,
+        font_size: None,
         is_visible: Some(true),
     };
 
@@ -2018,6 +2056,9 @@ async fn test_concurrent_content_block_creation_same_section() {
         title: Some("Block 2".to_string()),
         text: "Text 2".to_string(),
         media_id: None,
+        media_ids: None,
+        font_family: None,
+        font_size: None,
         is_visible: Some(true),
     };
 
@@ -2516,8 +2557,8 @@ async fn test_media_backed_section_move_preserves_media_identity() {
     assert_eq!(res_move.status(), Status::Ok);
     let moved_dto: SingleResponse<AdminContentBlockDto> = res_move.into_json().await.unwrap();
     assert_eq!(moved_dto.data.spa_section_id, a_sec.data.id);
-    assert!(moved_dto.data.media.is_some());
-    assert_eq!(moved_dto.data.media.unwrap().id, media_id);
+    assert!(!moved_dto.data.media.is_empty());
+    assert_eq!(moved_dto.data.media[0].id, media_id);
 
     // 5. Query section_media relation identity after move -> MUST BE UNCHANGED
     let sm_after: (uuid::Uuid, uuid::Uuid) =
@@ -2610,10 +2651,7 @@ async fn test_public_page_grouped_response_and_visibility_matrix() {
     let token = harness.super_admin_token.clone();
 
     // 1. Clean up dynamic sections so only bootstrap sections remain
-    sqlx::query("DELETE FROM spa_sections WHERE page_id = (SELECT id FROM pages WHERE slug = 'home') AND section_key NOT IN ('about-us', 'our-works', 'festivals', 'gallery', 'contact-us')")
-        .execute(&harness.pool)
-        .await
-        .ok();
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
 
     // 2. Query GET /api/v1/public/page (unauthenticated)
     let res = harness.client.get("/api/v1/public/page").dispatch().await;
@@ -2621,7 +2659,7 @@ async fn test_public_page_grouped_response_and_visibility_matrix() {
     let public_resp: SingleResponse<PublicPageResponse> = res.into_json().await.unwrap();
 
     assert_eq!(public_resp.data.page.slug, "home");
-    assert!(public_resp.data.sections.len() >= 5);
+    assert!(public_resp.data.sections.len() >= 4);
     let bootstrap_keys: Vec<&str> = public_resp
         .data
         .sections
@@ -2629,8 +2667,11 @@ async fn test_public_page_grouped_response_and_visibility_matrix() {
         .map(|s| s.key.as_str())
         .collect();
     assert!(bootstrap_keys.contains(&"about-us"));
-    assert!(bootstrap_keys.contains(&"our-works"));
-    assert!(bootstrap_keys.contains(&"festivals"));
+    assert!(bootstrap_keys.contains(&"gallery"));
+    assert!(bootstrap_keys.contains(&"contact-us"));
+    assert!(bootstrap_keys.contains(&"testimonials"));
+    assert!(!bootstrap_keys.contains(&"our-works"));
+    assert!(!bootstrap_keys.contains(&"festivals"));
 
     // 3. Create dynamic section "Public Visible Sec" (is_visible = true) & "Public Hidden Sec" (is_visible = false)
     let sec_vis: SingleResponse<AdminSpaSectionDto> = harness
@@ -3243,17 +3284,32 @@ async fn test_public_spa_contract_reorder_move_delete_and_foreign_isolation_e2e(
     let init_res = harness.client.get("/api/v1/public/page").dispatch().await;
     assert_eq!(init_res.status(), Status::Ok);
     let init_data: SingleResponse<PublicPageResponse> = init_res.into_json().await.unwrap();
-    let original_sec_ids: Vec<Uuid> = init_data.data.sections.iter().map(|s| s.id).collect();
-    assert_eq!(original_sec_ids.len(), 5);
+    let original_pub_sec_ids: Vec<Uuid> = init_data.data.sections.iter().map(|s| s.id).collect();
+    assert_eq!(original_pub_sec_ids.len(), 4);
 
-    let mut reversed_sec_ids = original_sec_ids.clone();
-    reversed_sec_ids.reverse();
+    let mut reversed_pub_sec_ids = original_pub_sec_ids.clone();
+    reversed_pub_sec_ids.reverse();
 
-    let reorder_items: Vec<serde_json::Value> = reversed_sec_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, id)| serde_json::json!({ "id": id, "sort_order": (idx as i32 + 1) * 10 }))
-        .collect();
+    let admin_sec_res = harness
+        .client
+        .get("/api/v1/admin/spa-sections")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .dispatch()
+        .await;
+    let admin_sec_body: SingleResponse<Vec<AdminSpaSectionDto>> =
+        admin_sec_res.into_json().await.unwrap();
+
+    let mut reorder_items = Vec::new();
+    for (idx, id) in reversed_pub_sec_ids.iter().enumerate() {
+        reorder_items.push(serde_json::json!({ "id": id, "sort_order": (idx as i32 + 1) * 10 }));
+    }
+    let mut offset = (reversed_pub_sec_ids.len() as i32 + 1) * 10;
+    for s in &admin_sec_body.data {
+        if !reversed_pub_sec_ids.contains(&s.id) {
+            reorder_items.push(serde_json::json!({ "id": s.id, "sort_order": offset }));
+            offset += 10;
+        }
+    }
 
     let reorder_sec_res = harness
         .client
@@ -3274,16 +3330,22 @@ async fn test_public_spa_contract_reorder_move_delete_and_foreign_isolation_e2e(
         .map(|s| s.id)
         .collect();
     assert_eq!(
-        new_pub_sec_ids, reversed_sec_ids,
+        new_pub_sec_ids, reversed_pub_sec_ids,
         "Public section order MUST match new sort_order"
     );
 
     // Restore section order
-    let restore_items: Vec<serde_json::Value> = original_sec_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, id)| serde_json::json!({ "id": id, "sort_order": (idx as i32 + 1) * 10 }))
-        .collect();
+    let mut restore_items = Vec::new();
+    for (idx, id) in original_pub_sec_ids.iter().enumerate() {
+        restore_items.push(serde_json::json!({ "id": id, "sort_order": (idx as i32 + 1) * 10 }));
+    }
+    let mut restore_offset = (original_pub_sec_ids.len() as i32 + 1) * 10;
+    for s in &admin_sec_body.data {
+        if !original_pub_sec_ids.contains(&s.id) {
+            restore_items.push(serde_json::json!({ "id": s.id, "sort_order": restore_offset }));
+            restore_offset += 10;
+        }
+    }
 
     harness
         .client
@@ -3833,7 +3895,7 @@ async fn test_public_spa_contract_reorder_move_delete_and_foreign_isolation_e2e(
         .unwrap();
     let pub_img_m = pub_b_img
         .media
-        .as_ref()
+        .first()
         .expect("Public image media MUST exist");
     match pub_img_m {
         PublicMediaDto::Image { id, url, .. } => {
@@ -3860,7 +3922,7 @@ async fn test_public_spa_contract_reorder_move_delete_and_foreign_isolation_e2e(
     );
     let pub_vid_m = pub_b_vid
         .media
-        .as_ref()
+        .first()
         .expect("Public video media MUST exist");
     match pub_vid_m {
         PublicMediaDto::Video { id, url, .. } => {
@@ -3884,7 +3946,7 @@ async fn test_public_spa_contract_reorder_move_delete_and_foreign_isolation_e2e(
         .unwrap();
     let pub_yt_m = pub_b_yt
         .media
-        .as_ref()
+        .first()
         .expect("Public YouTube media MUST exist");
     match pub_yt_m {
         PublicMediaDto::Youtube {
@@ -4400,4 +4462,1106 @@ async fn test_normal_admin_rejected_for_all_user_operations() {
         .dispatch()
         .await;
     assert_eq!(deactivate_res.status(), Status::Forbidden);
+}
+
+async fn upload_helper_image(harness: &TestHarness, token: &str, filename: &str) -> Uuid {
+    let boundary = "---------------------------974767299852498929531610575";
+    let jpeg_magic = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46];
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            filename
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"Content-Type: image/jpeg\r\n\r\n");
+    body.extend_from_slice(&jpeg_magic);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/media/upload")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .header(Header::new(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        ))
+        .body(body)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Ok);
+    let dto: SingleResponse<AdminMediaDto> = res.into_json().await.unwrap();
+    match dto.data {
+        AdminMediaDto::Image { id, .. } => id,
+        _ => panic!("Expected image"),
+    }
+}
+
+async fn upload_helper_video(harness: &TestHarness, token: &str, filename: &str) -> Uuid {
+    let boundary = "---------------------------974767299852498929531610575";
+    let mp4_bytes: Vec<u8> = vec![
+        0x00, 0x00, 0x00, 0x1C, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02,
+        0x00, 0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32, 0x61, 0x76, 0x63, 0x31,
+    ];
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            filename
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"Content-Type: video/mp4\r\n\r\n");
+    body.extend_from_slice(&mp4_bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/media/upload")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .header(Header::new(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        ))
+        .body(body)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Ok);
+    let dto: SingleResponse<AdminMediaDto> = res.into_json().await.unwrap();
+    match dto.data {
+        AdminMediaDto::Video { id, .. } => id,
+        _ => panic!("Expected video"),
+    }
+}
+
+// =========================================================================
+// PART 13: MULTI-IMAGE CAROUSEL INTEGRATION TESTS
+// =========================================================================
+#[tokio::test]
+async fn test_multi_image_carousel_crud_and_validation() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let token = harness.super_admin_token.clone();
+
+    // 1. Create test SPA section
+    let sec: SingleResponse<AdminSpaSectionDto> = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "title": "Carousel Test Section" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+
+    // 2. Upload 3 test images and 1 test video
+    let img1_id = upload_helper_image(&harness, &token, "test1.jpg").await;
+    let img2_id = upload_helper_image(&harness, &token, "test2.jpg").await;
+    let img3_id = upload_helper_image(&harness, &token, "test3.jpg").await;
+    let vid_id = upload_helper_video(&harness, &token, "test_vid.mp4").await;
+
+    // 3. Create block with ONE image (legacy media_id)
+    let b1_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text_image",
+            "title": "Single Image Block",
+            "text": "Single image text",
+            "media_id": img1_id
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(b1_res.status(), Status::Created);
+    let b1: SingleResponse<AdminContentBlockDto> = b1_res.into_json().await.unwrap();
+    assert_eq!(b1.data.media.len(), 1);
+    assert_eq!(b1.data.media[0].id, img1_id);
+
+    // 4. Create block with MULTIPLE images (carousel media_ids)
+    let b2_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text_image",
+            "title": "Multi Image Carousel Block",
+            "text": "Carousel description text",
+            "media_ids": [img1_id, img2_id, img3_id]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(b2_res.status(), Status::Created);
+    let b2: SingleResponse<AdminContentBlockDto> = b2_res.into_json().await.unwrap();
+    assert_eq!(b2.data.media.len(), 3);
+    assert_eq!(b2.data.media[0].id, img1_id);
+    assert_eq!(b2.data.media[1].id, img2_id);
+    assert_eq!(b2.data.media[2].id, img3_id);
+
+    // 5. Update from one -> multiple images
+    let update_to_multi_res = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", b1.data.id))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "media_ids": [img2_id, img3_id]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(update_to_multi_res.status(), Status::Ok);
+    let b1_updated: SingleResponse<AdminContentBlockDto> =
+        update_to_multi_res.into_json().await.unwrap();
+    assert_eq!(b1_updated.data.media.len(), 2);
+    assert_eq!(b1_updated.data.media[0].id, img2_id);
+    assert_eq!(b1_updated.data.media[1].id, img3_id);
+
+    // 6. Update from multiple -> one image
+    let update_to_single_res = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", b2.data.id))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "media_ids": [img1_id]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(update_to_single_res.status(), Status::Ok);
+    let b2_updated: SingleResponse<AdminContentBlockDto> =
+        update_to_single_res.into_json().await.unwrap();
+    assert_eq!(b2_updated.data.media.len(), 1);
+    assert_eq!(b2_updated.data.media[0].id, img1_id);
+
+    // 7. Duplicate media IDs rejected
+    let dup_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text_image",
+            "title": "Duplicate Media Block",
+            "text": "Some text",
+            "media_ids": [img1_id, img1_id]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(dup_res.status(), Status::UnprocessableEntity);
+
+    // 8. Unknown media ID rejected
+    let unknown_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text_image",
+            "title": "Unknown Media Block",
+            "text": "Some text",
+            "media_ids": [Uuid::new_v4()]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(unknown_res.status(), Status::UnprocessableEntity);
+
+    // 9. Wrong media type rejected (video on text_image)
+    let wrong_type_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text_image",
+            "title": "Wrong Media Type Block",
+            "text": "Some text",
+            "media_ids": [vid_id]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(wrong_type_res.status(), Status::UnprocessableEntity);
+
+    // 10. Public page returns multiple images in deterministic order
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res.status(), Status::Ok);
+    let pub_data: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+    let pub_sec = pub_data
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec.data.id)
+        .unwrap();
+    let pub_b1 = pub_sec.blocks.iter().find(|b| b.id == b1.data.id).unwrap();
+    assert_eq!(pub_b1.media.len(), 2);
+    match &pub_b1.media[0] {
+        PublicMediaDto::Image { id, .. } => assert_eq!(*id, img2_id),
+        _ => panic!("Expected image"),
+    }
+    match &pub_b1.media[1] {
+        PublicMediaDto::Image { id, .. } => assert_eq!(*id, img3_id),
+        _ => panic!("Expected image"),
+    }
+}
+
+// =========================================================================
+// PART 14: DEFAULT FOUR SECTIONS MIGRATION TESTS
+// =========================================================================
+#[tokio::test]
+async fn test_default_four_sections_order_and_preservation() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let token = harness.super_admin_token.clone();
+
+    // 1. Fetch public page
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res.status(), Status::Ok);
+    let pub_data: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+
+    // Verify canonical defaults exist
+    let visible_default_keys: Vec<&str> = pub_data
+        .data
+        .sections
+        .iter()
+        .filter(|s| ["about-us", "gallery", "contact-us", "testimonials"].contains(&s.key.as_str()))
+        .map(|s| s.key.as_str())
+        .collect();
+
+    assert!(visible_default_keys.contains(&"about-us"));
+    assert!(visible_default_keys.contains(&"gallery"));
+    assert!(visible_default_keys.contains(&"contact-us"));
+    assert!(visible_default_keys.contains(&"testimonials"));
+
+    // Verify old defaults are NOT in public response (is_visible = false)
+    let has_our_works = pub_data.data.sections.iter().any(|s| s.key == "our-works");
+    let has_festivals = pub_data.data.sections.iter().any(|s| s.key == "festivals");
+    assert!(!has_our_works, "our-works MUST be hidden on public page");
+    assert!(!has_festivals, "festivals MUST be hidden on public page");
+
+    // 2. Verify in DB that old defaults still exist with is_visible = false (user content not destroyed)
+    let old_works: Option<(bool,)> =
+        sqlx::query_as("SELECT is_visible FROM spa_sections WHERE section_key = 'our-works'")
+            .fetch_optional(&harness.pool)
+            .await
+            .unwrap();
+    if let Some((is_vis,)) = old_works {
+        assert!(!is_vis, "our-works is_visible must be false");
+    }
+
+    // 3. User-created sections are preserved
+    let custom_sec_res = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "title": "My Custom User Section" }))
+        .dispatch()
+        .await;
+    assert_eq!(custom_sec_res.status(), Status::Created);
+}
+
+// =========================================================================
+// PART 15: PUBLIC CONTACT US FORM & SMTP TESTS
+// =========================================================================
+#[tokio::test]
+async fn test_public_contact_form_and_smtp_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // 1. Valid submission without auth -> 200 OK & DB row created
+    let valid_contact = json!({
+        "name": "Jane Sax",
+        "email": "jane.sax@example.com",
+        "subject": "Concert booking",
+        "message": "We would love to book a performance for next month."
+    });
+
+    let res = harness
+        .client
+        .post("/api/v1/public/contact")
+        .json(&valid_contact)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Ok);
+
+    // Verify DB persistence
+    let saved_msg: Option<(String, String, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT name, email, subject, message, email_status FROM contact_messages WHERE email = 'jane.sax@example.com' ORDER BY created_at DESC LIMIT 1"
+    )
+    .fetch_optional(&harness.pool)
+    .await
+    .unwrap();
+
+    assert!(saved_msg.is_some());
+    let (name, email, subj, msg, status) = saved_msg.unwrap();
+    assert_eq!(name, "Jane Sax");
+    assert_eq!(email, "jane.sax@example.com");
+    assert_eq!(subj.as_deref(), Some("Concert booking"));
+    assert!(msg.contains("book a performance"));
+    assert_eq!(status, "disabled"); // In default test env SMTP_ENABLED=false
+
+    // 2. Validation error: invalid email -> 422
+    let bad_email = json!({
+        "name": "Jane",
+        "email": "not-an-email",
+        "message": "Hello"
+    });
+    let bad_res = harness
+        .client
+        .post("/api/v1/public/contact")
+        .json(&bad_email)
+        .dispatch()
+        .await;
+    assert_eq!(bad_res.status(), Status::UnprocessableEntity);
+
+    // 3. Validation error: empty name -> 422
+    let empty_name = json!({
+        "name": "   ",
+        "email": "jane@example.com",
+        "message": "Hello"
+    });
+    let empty_name_res = harness
+        .client
+        .post("/api/v1/public/contact")
+        .json(&empty_name)
+        .dispatch()
+        .await;
+    assert_eq!(empty_name_res.status(), Status::UnprocessableEntity);
+
+    // 4. Validation error: empty message -> 422
+    let empty_msg = json!({
+        "name": "Jane",
+        "email": "jane@example.com",
+        "message": "   "
+    });
+    let empty_msg_res = harness
+        .client
+        .post("/api/v1/public/contact")
+        .json(&empty_msg)
+        .dispatch()
+        .await;
+    assert_eq!(empty_msg_res.status(), Status::UnprocessableEntity);
+}
+
+// =========================================================================
+// PART 16: TYPOGRAPHY INTEGRATION TESTS
+// =========================================================================
+#[tokio::test]
+async fn test_content_block_typography_settings() {
+    use spa_sax_backend::domain::sections::{FontFamily, FontSize};
+
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let token = harness.super_admin_token.clone();
+
+    let sec: SingleResponse<AdminSpaSectionDto> = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "title": "Typography Section" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+
+    // 1. Create with default typography (sans, md)
+    let b_default: SingleResponse<AdminContentBlockDto> = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text",
+            "title": "Default Typo",
+            "text": "Default text"
+        }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+    assert_eq!(b_default.data.font_family, FontFamily::Sans);
+    assert_eq!(b_default.data.font_size, FontSize::Md);
+
+    // 2. Create with explicit serif and lg
+    let b_custom: SingleResponse<AdminContentBlockDto> = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text",
+            "title": "Serif Block",
+            "text": "Serif text",
+            "font_family": "serif",
+            "font_size": "lg"
+        }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+    assert_eq!(b_custom.data.font_family, FontFamily::Serif);
+    assert_eq!(b_custom.data.font_size, FontSize::Lg);
+
+    // 3. Update typography to mono / 2xl
+    let update_typo_res = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", b_custom.data.id))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "font_family": "mono",
+            "font_size": "2xl"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(update_typo_res.status(), Status::Ok);
+    let updated_b: SingleResponse<AdminContentBlockDto> =
+        update_typo_res.into_json().await.unwrap();
+    assert_eq!(updated_b.data.font_family, FontFamily::Mono);
+    assert_eq!(updated_b.data.font_size, FontSize::TwoXl);
+
+    // 4. Invalid font rejected -> 422
+    let bad_font = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text",
+            "title": "Bad Font",
+            "text": "Some text",
+            "font_family": "comic-sans"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(bad_font.status(), Status::UnprocessableEntity);
+
+    // 5. Invalid size rejected -> 422
+    let bad_size = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "spa_section_id": sec.data.id,
+            "block_type": "text",
+            "title": "Bad Size",
+            "text": "Some text",
+            "font_size": "72px"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(bad_size.status(), Status::UnprocessableEntity);
+
+    // 6. Public page exposes typography settings
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    let pub_page: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+    let sec_pub = pub_page
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec.data.id)
+        .unwrap();
+    let pub_block = sec_pub
+        .blocks
+        .iter()
+        .find(|b| b.id == b_custom.data.id)
+        .unwrap();
+    assert_eq!(pub_block.font_family, FontFamily::Mono);
+    assert_eq!(pub_block.font_size, FontSize::TwoXl);
+}
+
+// =========================================================================
+// PART 17: REORDER ROBUSTNESS REGRESSION TESTS
+// =========================================================================
+#[tokio::test]
+async fn test_reorder_robustness_gaps_swaps_and_duplicates() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let token = harness.super_admin_token.clone();
+
+    let sec: SingleResponse<AdminSpaSectionDto> = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "title": "Robust Reorder Section" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+
+    let b1: SingleResponse<AdminContentBlockDto> = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "spa_section_id": sec.data.id, "block_type": "text", "text": "B1" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+
+    let b2: SingleResponse<AdminContentBlockDto> = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "spa_section_id": sec.data.id, "block_type": "text", "text": "B2" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+
+    let b3: SingleResponse<AdminContentBlockDto> = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({ "spa_section_id": sec.data.id, "block_type": "text", "text": "B3" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+
+    // 1. Swap collision: Move Up / Move Down where b1 and b2 swap sort orders (20, 10)
+    let swap_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/spa-sections/{}/content-blocks/reorder",
+            sec.data.id
+        ))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "items": [
+                { "id": b2.data.id, "sort_order": 10 },
+                { "id": b1.data.id, "sort_order": 20 },
+                { "id": b3.data.id, "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(swap_res.status(), Status::Ok);
+
+    // 2. Intermediate duplicate sort_order during UI move (b1=10, b2=10) -> MUST SUCCEED without VALIDATION_ERROR
+    let dup_sort_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/spa-sections/{}/content-blocks/reorder",
+            sec.data.id
+        ))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "items": [
+                { "id": b1.data.id, "sort_order": 10 },
+                { "id": b2.data.id, "sort_order": 10 },
+                { "id": b3.data.id, "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(dup_sort_res.status(), Status::Ok);
+
+    // 3. Existing gapped sort orders (10, 30, 90) -> normalizes successfully
+    sqlx::query("UPDATE sections SET sort_order = 10 WHERE id = $1")
+        .bind(b1.data.id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sections SET sort_order = 30 WHERE id = $1")
+        .bind(b2.data.id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sections SET sort_order = 90 WHERE id = $1")
+        .bind(b3.data.id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let gap_reorder_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/spa-sections/{}/content-blocks/reorder",
+            sec.data.id
+        ))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "items": [
+                { "id": b3.data.id, "sort_order": 10 },
+                { "id": b2.data.id, "sort_order": 20 },
+                { "id": b1.data.id, "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(gap_reorder_res.status(), Status::Ok);
+
+    // 4. Duplicate block IDs in request -> MUST be rejected (422)
+    let dup_block_id_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/spa-sections/{}/content-blocks/reorder",
+            sec.data.id
+        ))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "items": [
+                { "id": b1.data.id, "sort_order": 10 },
+                { "id": b1.data.id, "sort_order": 20 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(dup_block_id_res.status(), Status::UnprocessableEntity);
+
+    // 5. Unknown block ID -> MUST be rejected (422)
+    let unknown_block_res = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/spa-sections/{}/content-blocks/reorder",
+            sec.data.id
+        ))
+        .header(Header::new("Authorization", format!("Bearer {}", token)))
+        .json(&json!({
+            "items": [
+                { "id": Uuid::new_v4(), "sort_order": 10 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(unknown_block_res.status(), Status::UnprocessableEntity);
+}
+
+// =========================================================================
+// PART 18: FAKE CONTACT MAILER & SMTP DELIVERABILITY REGRESSIONS
+// =========================================================================
+use async_trait::async_trait;
+use spa_sax_backend::application::dto::ContactRequest;
+use spa_sax_backend::application::services::{ContactMailer, ContactService};
+use spa_sax_backend::config::SmtpConfig;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+pub struct FakeContactMailer {
+    pub should_succeed: bool,
+    pub error_message: String,
+    pub call_count: AtomicUsize,
+}
+
+impl FakeContactMailer {
+    pub fn new(should_succeed: bool, error_message: &str) -> Self {
+        Self {
+            should_succeed,
+            error_message: error_message.to_string(),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ContactMailer for FakeContactMailer {
+    async fn send_contact_notification(
+        &self,
+        _recipient: &str,
+        _name: &str,
+        _email: &str,
+        _subject: Option<&str>,
+        _message: &str,
+    ) -> Result<(), String> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        if self.should_succeed {
+            Ok(())
+        } else {
+            Err(self.error_message.clone())
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_contact_smtp_success_delivery_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let mailer = Arc::new(FakeContactMailer::new(true, ""));
+    let smtp_config = SmtpConfig {
+        enabled: true,
+        host: "smtp.fake.test".to_string(),
+        port: 587,
+        username: Some("user".to_string()),
+        password: Some("secret123".to_string()),
+        from_email: "noreply@example.com".to_string(),
+        from_name: "Ensti Sax".to_string(),
+        contact_notification_email: "booking@example.com".to_string(),
+        starttls: true,
+    };
+
+    let service = ContactService::new(harness.pool.clone(), mailer.clone(), smtp_config);
+
+    let test_email = format!("success_{}@example.com", Uuid::new_v4().simple());
+    let req = ContactRequest {
+        name: "Success User".to_string(),
+        email: test_email.clone(),
+        subject: Some("Booking Enquiry".to_string()),
+        message: "We would like to book a performance.".to_string(),
+    };
+
+    let res = service.submit_contact(req).await;
+    assert!(res.is_ok(), "submit_contact must succeed");
+    let resp_val = res.unwrap();
+    assert_eq!(resp_val.status, "success");
+
+    // 1. Exactly 1 invocation of the mailer
+    assert_eq!(
+        mailer.call_count.load(Ordering::SeqCst),
+        1,
+        "Mailer MUST be called exactly once on successful submission"
+    );
+
+    // 2. Database state: email_status = 'sent', email_sent_at IS NOT NULL, email_error IS NULL
+    let row = sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>, Option<String>)>(
+        "SELECT email_status, email_sent_at, email_error FROM contact_messages WHERE email = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(&test_email)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("Saved contact message must exist in database");
+
+    assert_eq!(row.0, "sent", "email_status MUST be 'sent'");
+    assert!(row.1.is_some(), "email_sent_at MUST be populated");
+    assert!(row.2.is_none(), "email_error MUST be NULL on success");
+}
+
+#[tokio::test]
+async fn test_contact_smtp_failure_preserves_db_submission() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let secret_pass = "super_secret_password_xyz999";
+    let failure_msg = format!(
+        "SMTP connection refused: auth failed for secret {}",
+        secret_pass
+    );
+    let mailer = Arc::new(FakeContactMailer::new(false, &failure_msg));
+
+    let smtp_config = SmtpConfig {
+        enabled: true,
+        host: "smtp.fake.test".to_string(),
+        port: 587,
+        username: Some("user".to_string()),
+        password: Some(secret_pass.to_string()),
+        from_email: "noreply@example.com".to_string(),
+        from_name: "Ensti Sax".to_string(),
+        contact_notification_email: "booking@example.com".to_string(),
+        starttls: true,
+    };
+
+    let service = ContactService::new(harness.pool.clone(), mailer.clone(), smtp_config);
+
+    let test_email = format!("failure_{}@example.com", Uuid::new_v4().simple());
+    let req = ContactRequest {
+        name: "Failure User".to_string(),
+        email: test_email.clone(),
+        subject: Some("Urgent Enquiry".to_string()),
+        message: "Testing delivery failure resilience.".to_string(),
+    };
+
+    // 1. Client HTTP request still succeeds (DB persistence is authoritative)
+    let res = service.submit_contact(req).await;
+    assert!(
+        res.is_ok(),
+        "SMTP failure MUST NOT fail the user submission HTTP request"
+    );
+    let resp_val = res.unwrap();
+    assert_eq!(resp_val.status, "success");
+
+    // 2. Exactly 1 invocation of the mailer
+    assert_eq!(
+        mailer.call_count.load(Ordering::SeqCst),
+        1,
+        "Mailer MUST be invoked once even when failing"
+    );
+
+    // 3. Database state: record exists, email_status = 'failed', email_sent_at IS NULL, error sanitized
+    let row = sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>, Option<String>)>(
+        "SELECT email_status, email_sent_at, email_error FROM contact_messages WHERE email = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(&test_email)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("Contact submission MUST be persisted in database despite SMTP failure");
+
+    assert_eq!(row.0, "failed", "email_status MUST be 'failed'");
+    assert!(row.1.is_none(), "email_sent_at MUST be NULL on failure");
+    assert!(row.2.is_some(), "email_error MUST be recorded");
+
+    let stored_err = row.2.unwrap();
+    assert!(
+        !stored_err.contains(secret_pass),
+        "Stored email_error MUST NOT contain raw SMTP credentials"
+    );
+    assert!(
+        stored_err.contains("[REDACTED]"),
+        "Stored email_error MUST redact sensitive password occurrences"
+    );
+    assert!(
+        stored_err.len() <= 500,
+        "Stored email_error MUST be bounded to max 500 characters"
+    );
+}
+
+#[tokio::test]
+async fn test_contact_smtp_disabled_mode_zero_calls() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let mailer = Arc::new(FakeContactMailer::new(true, ""));
+    let smtp_config = SmtpConfig {
+        enabled: false,
+        host: String::new(),
+        port: 0,
+        username: None,
+        password: None,
+        from_email: String::new(),
+        from_name: String::new(),
+        contact_notification_email: String::new(),
+        starttls: true,
+    };
+
+    let service = ContactService::new(harness.pool.clone(), mailer.clone(), smtp_config);
+
+    let test_email = format!("disabled_{}@example.com", Uuid::new_v4().simple());
+    let req = ContactRequest {
+        name: "Disabled SMTP User".to_string(),
+        email: test_email.clone(),
+        subject: Some("General Question".to_string()),
+        message: "Submitting inquiry with SMTP disabled.".to_string(),
+    };
+
+    let res = service.submit_contact(req).await;
+    assert!(res.is_ok(), "submit_contact must succeed");
+
+    // 1. Mailer MUST NOT be invoked when SMTP is disabled
+    assert_eq!(
+        mailer.call_count.load(Ordering::SeqCst),
+        0,
+        "Mailer MUST NOT be called when SMTP is disabled"
+    );
+
+    // 2. Database state: email_status = 'disabled'
+    let row = sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>, Option<String>)>(
+        "SELECT email_status, email_sent_at, email_error FROM contact_messages WHERE email = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(&test_email)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("Contact submission MUST be persisted in database");
+
+    assert_eq!(row.0, "disabled", "email_status MUST be 'disabled'");
+    assert!(row.1.is_none());
+    assert!(row.2.is_none());
+}
+
+// =========================================================================
+// PART 19: MIGRATION 0011 IDEMPOTENCY & MISSING SECTIONS RECOVERY TESTS
+// =========================================================================
+#[tokio::test]
+async fn test_migration_0011_idempotency_and_missing_sections_recovery() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let home_id: (Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    // 1. Attach a content block to existing canonical 'about-us' section
+    let about_sec: (Uuid,) = sqlx::query_as(
+        "SELECT id FROM spa_sections WHERE page_id = $1 AND section_key = 'about-us'",
+    )
+    .bind(home_id.0)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    let about_block_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sections (id, page_id, spa_section_id, section_key, section_type, title, content)
+         VALUES ($1, $2, $3, $4, 'text', 'About Us Block', '{}')"
+    )
+    .bind(about_block_id)
+    .bind(home_id.0)
+    .bind(about_sec.0)
+    .bind(format!("key_{}", about_block_id.simple()))
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 2. Create a user-created custom section with content block
+    let custom_sec_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO spa_sections (id, page_id, section_key, title, navigation_label, sort_order, is_visible)
+         VALUES ($1, $2, 'custom-events', 'Custom Events', 'Custom Events', 99, TRUE)"
+    )
+    .bind(custom_sec_id)
+    .bind(home_id.0)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let custom_block_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sections (id, page_id, spa_section_id, section_key, section_type, title, content)
+         VALUES ($1, $2, $3, $4, 'text', 'Custom Event Block', '{}')"
+    )
+    .bind(custom_block_id)
+    .bind(home_id.0)
+    .bind(custom_sec_id)
+    .bind(format!("key_{}", custom_block_id.simple()))
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 3. Simulate absence of canonical sections: delete 'gallery' and 'testimonials'
+    sqlx::query("DELETE FROM spa_sections WHERE page_id = $1 AND section_key IN ('gallery', 'testimonials')")
+        .bind(home_id.0)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    // Verify gallery and testimonials are absent
+    let missing_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM spa_sections WHERE page_id = $1 AND section_key IN ('gallery', 'testimonials')"
+    )
+    .bind(home_id.0)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        missing_count.0, 0,
+        "Gallery and testimonials must be absent before migration execution"
+    );
+
+    // 4. Execute the idempotent upsert logic (same as migration 0011)
+    let migration_sql = include_str!("../../migrations/0011_default_four_sections.sql");
+    sqlx::raw_sql(migration_sql)
+        .execute(&harness.pool)
+        .await
+        .expect("Migration 0011 execution must succeed");
+
+    // 5. Verify all four canonical sections exist, visible, and ordered 10, 20, 30, 40
+    let canonical_sections = sqlx::query_as::<_, (String, String, i32, bool)>(
+        "SELECT section_key, title, sort_order, is_visible
+         FROM spa_sections
+         WHERE page_id = $1 AND section_key IN ('about-us', 'gallery', 'contact-us', 'testimonials')
+         ORDER BY sort_order ASC",
+    )
+    .bind(home_id.0)
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        canonical_sections.len(),
+        4,
+        "All 4 canonical sections MUST exist"
+    );
+    assert_eq!(
+        canonical_sections[0],
+        ("about-us".to_string(), "About Us".to_string(), 10, true)
+    );
+    assert_eq!(
+        canonical_sections[1],
+        ("gallery".to_string(), "Gallery".to_string(), 20, true)
+    );
+    assert_eq!(
+        canonical_sections[2],
+        ("contact-us".to_string(), "Contact Us".to_string(), 30, true)
+    );
+    assert_eq!(
+        canonical_sections[3],
+        (
+            "testimonials".to_string(),
+            "Testimonials".to_string(),
+            40,
+            true
+        )
+    );
+
+    // 6. Verify old default sections ('our-works', 'festivals') are hidden (is_visible = false)
+    let old_defaults = sqlx::query_as::<_, (String, bool)>(
+        "SELECT section_key, is_visible
+         FROM spa_sections
+         WHERE page_id = $1 AND section_key IN ('our-works', 'festivals')
+         ORDER BY section_key ASC",
+    )
+    .bind(home_id.0)
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+
+    for (key, visible) in old_defaults {
+        assert!(
+            !visible,
+            "Old default section '{}' MUST be hidden (is_visible = false)",
+            key
+        );
+    }
+
+    // 7. Verify user-created custom section 'Custom Events' is preserved with content
+    let custom_sec = sqlx::query_as::<_, (Uuid, String, i32, bool)>(
+        "SELECT id, section_key, sort_order, is_visible
+         FROM spa_sections
+         WHERE id = $1",
+    )
+    .bind(custom_sec_id)
+    .fetch_optional(&harness.pool)
+    .await
+    .unwrap();
+    assert!(custom_sec.is_some(), "Custom section MUST be preserved");
+    let custom_sec_val = custom_sec.unwrap();
+    assert_eq!(custom_sec_val.1, "custom-events");
+    assert!(
+        custom_sec_val.3,
+        "Custom section visibility MUST remain unchanged"
+    );
+
+    let custom_block =
+        sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, spa_section_id FROM sections WHERE id = $1")
+            .bind(custom_block_id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        custom_block.1, custom_sec_id,
+        "Custom content block MUST remain attached to custom section"
+    );
+
+    // 8. Verify existing canonical 'about-us' content block is preserved with exact same section ID
+    let about_block =
+        sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, spa_section_id FROM sections WHERE id = $1")
+            .bind(about_block_id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        about_block.1, about_sec.0,
+        "About us content block MUST remain attached to same section ID"
+    );
+
+    // Cleanup fixtures
+    common::cleanup_content_block(&harness.pool, about_block_id)
+        .await
+        .ok();
+    common::cleanup_content_block(&harness.pool, custom_block_id)
+        .await
+        .ok();
+    common::cleanup_spa_section(&harness.pool, custom_sec_id)
+        .await
+        .ok();
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
 }

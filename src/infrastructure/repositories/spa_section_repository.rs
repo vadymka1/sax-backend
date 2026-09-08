@@ -324,7 +324,8 @@ impl<'a> SpaSectionRepository<'a> {
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        let db_ids_set: HashSet<Uuid> = active_rows.into_iter().map(|r| r.0).collect();
+        let active_ids: Vec<Uuid> = active_rows.into_iter().map(|r| r.0).collect();
+        let db_ids_set: HashSet<Uuid> = active_ids.iter().cloned().collect();
 
         // 2. Validate request item counts and uniqueness
         if items.len() != db_ids_set.len() {

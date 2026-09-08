@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::domain::sections::ContentBlockType;
+use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PublicPageDto {
@@ -41,7 +41,9 @@ pub struct PublicContentBlockDto {
     pub block_type: ContentBlockType,
     pub title: Option<String>,
     pub text: String,
-    pub media: Option<PublicMediaDto>,
+    pub media: Vec<PublicMediaDto>,
+    pub font_family: FontFamily,
+    pub font_size: FontSize,
     pub sort_order: i32,
 }
 

@@ -133,6 +133,11 @@ Content blocks persist typography tokens:
 - Deterministic sequence normalization (`(idx + 1) * 10`) regardless of duplicate input sort orders.
 - Two-phase collision-free database updates.
 
+### 6. Robust SPA Section Reordering
+- Eliminates `VALIDATION_ERROR` on duplicate or intermediate requested sort orders during UI drag/swap operations.
+- Incoming order values are treated as ordering hints; the backend deterministically canonicalizes to 10-step values (`10, 20, 30, ...`) using request index as tie-breaker.
+- Two-phase database transaction ensuring zero collision errors under PostgreSQL check constraints (`sort_order >= 0`).
+
 ---
 
 ## 7. OpenAPI / Swagger

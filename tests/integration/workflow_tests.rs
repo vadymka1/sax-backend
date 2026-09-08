@@ -181,6 +181,7 @@ async fn test_home_page_migration_exists() {
 
 #[tokio::test]
 async fn test_authentication_login_and_refresh_flow() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     // 1. Create a user with password
@@ -244,6 +245,7 @@ async fn test_authentication_login_and_refresh_flow() {
 
 #[tokio::test]
 async fn test_admin_creation_permissions_and_duplicate_email() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     // 1. Super Admin creates a new Admin via HTTP POST /api/v1/admin/users
@@ -290,6 +292,7 @@ async fn test_admin_creation_permissions_and_duplicate_email() {
 
 #[tokio::test]
 async fn test_one_media_per_block_constraint_database_integrity() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     let section_id = uuid::Uuid::new_v4();
@@ -382,6 +385,7 @@ async fn test_one_media_per_block_constraint_database_integrity() {
 
 #[tokio::test]
 async fn test_cors_fairing_browser_preflight_and_origin_matching() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     // 1. Valid origin http://localhost:5173 on /api/v1/admin/content-blocks OPTIONS preflight
@@ -418,6 +422,7 @@ async fn test_cors_fairing_browser_preflight_and_origin_matching() {
 
 #[tokio::test]
 async fn test_admin_user_deactivation_protections_and_permissions() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     let service = spa_sax_backend::application::services::admin_user_service::AdminUserService::new(
@@ -449,6 +454,7 @@ async fn test_admin_user_deactivation_protections_and_permissions() {
 
 #[tokio::test]
 async fn test_service_cross_page_ownership_and_update_rollback() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     let auth_admin = spa_sax_backend::api::guards::AuthenticatedUser {
@@ -570,6 +576,7 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
 
 #[tokio::test]
 async fn test_deterministic_content_block_ordering() {
+    let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
     let auth_admin = spa_sax_backend::api::guards::AuthenticatedUser {
@@ -1250,6 +1257,8 @@ async fn test_admin_spa_sections_reorder_real_swap_and_failure_matrix() {
     let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
     let repo = spa_sax_backend::infrastructure::repositories::spa_section_repository::SpaSectionRepository::new(&harness.pool);
     let home_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
         .fetch_one(&harness.pool)
@@ -1259,15 +1268,15 @@ async fn test_admin_spa_sections_reorder_real_swap_and_failure_matrix() {
     let active_before = repo.list_admin_for_page(home_id.0).await.unwrap();
     assert!(active_before.len() >= 5);
 
-    // 1. Perform REAL swap of order for first two sections
+    // 1. Perform REAL swap of order for first two sections with guaranteed distinct sort orders
     let mut swapped_payload = Vec::new();
     for (idx, item) in active_before.iter().enumerate() {
         let target_order = if idx == 0 {
-            active_before[1].sort_order
+            20
         } else if idx == 1 {
-            active_before[0].sort_order
+            10
         } else {
-            item.sort_order
+            (idx as i32 + 1) * 10
         };
         swapped_payload.push(serde_json::json!({
             "id": item.id,
@@ -1352,7 +1361,7 @@ async fn test_admin_spa_sections_reorder_real_swap_and_failure_matrix() {
         .await;
     assert_eq!(res_neg.status(), Status::UnprocessableEntity);
 
-    // Duplicate sort_order
+    // Duplicate sort_order - now accepted as ordering hint, canonicalized to 10, 20, 30... and succeeds
     let mut dup_order_payload = swapped_payload.clone();
     dup_order_payload[1]["sort_order"] = dup_order_payload[0]["sort_order"].clone();
     let res_dup_order = harness
@@ -1365,7 +1374,11 @@ async fn test_admin_spa_sections_reorder_real_swap_and_failure_matrix() {
         .json(&serde_json::json!({ "items": dup_order_payload }))
         .dispatch()
         .await;
-    assert_eq!(res_dup_order.status(), Status::UnprocessableEntity);
+    assert_eq!(res_dup_order.status(), Status::Ok);
+
+    let active_after_dup = repo.list_admin_for_page(home_id.0).await.unwrap();
+    assert_eq!(active_after_dup[0].sort_order, 10);
+    assert_eq!(active_after_dup[1].sort_order, 20);
 
     // 3. Restore snapshot order
     for item in &active_before {
@@ -1376,6 +1389,7 @@ async fn test_admin_spa_sections_reorder_real_swap_and_failure_matrix() {
             .await
             .unwrap();
     }
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
 }
 
 #[tokio::test]
@@ -5563,5 +5577,233 @@ async fn test_migration_0011_idempotency_and_missing_sections_recovery() {
     common::cleanup_spa_section(&harness.pool, custom_sec_id)
         .await
         .ok();
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+}
+
+// =========================================================================
+// PART 19: SPA SECTION REORDER CANONICALIZATION & COLLISION SAFETY TESTS
+// =========================================================================
+
+#[tokio::test]
+async fn test_spa_sections_reorder_duplicate_sort_order_tie_breaking() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let repo = spa_sax_backend::infrastructure::repositories::spa_section_repository::SpaSectionRepository::new(&harness.pool);
+    let home_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    let active = repo.list_admin_for_page(home_id.0).await.unwrap();
+    assert!(active.len() >= 4);
+
+    // Provide duplicate sort orders (e.g. 10, 10, 30, 30, ...)
+    let mut payload_items = Vec::new();
+    for (idx, item) in active.iter().enumerate() {
+        let order = if idx < 2 {
+            10
+        } else if idx < 4 {
+            30
+        } else {
+            100
+        };
+        payload_items.push(serde_json::json!({
+            "id": item.id,
+            "sort_order": order
+        }));
+    }
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/spa-sections/reorder")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&serde_json::json!({ "items": payload_items }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+
+    // Verify deterministic canonical order (10, 20, 30, 40, 50, 60...)
+    let reordered = repo.list_admin_for_page(home_id.0).await.unwrap();
+    for (idx, item) in reordered.iter().enumerate() {
+        let expected_order = ((idx + 1) * 10) as i32;
+        assert_eq!(
+            item.sort_order, expected_order,
+            "Section at index {} must have canonical sort order {}",
+            idx, expected_order
+        );
+        // Tie-breaker asserts index 0 remained before index 1
+        if idx == 0 {
+            assert_eq!(item.id, active[0].id);
+        } else if idx == 1 {
+            assert_eq!(item.id, active[1].id);
+        }
+    }
+
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+}
+
+#[tokio::test]
+async fn test_spa_sections_reorder_gapped_values() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let repo = spa_sax_backend::infrastructure::repositories::spa_section_repository::SpaSectionRepository::new(&harness.pool);
+    let home_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    let active = repo.list_admin_for_page(home_id.0).await.unwrap();
+
+    // Large gaps: 15, 95, 250, 999...
+    let mut payload_items = Vec::new();
+    for (idx, item) in active.iter().enumerate() {
+        let order = (idx as i32 + 1) * 75;
+        payload_items.push(serde_json::json!({
+            "id": item.id,
+            "sort_order": order
+        }));
+    }
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/spa-sections/reorder")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&serde_json::json!({ "items": payload_items }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+
+    let reordered = repo.list_admin_for_page(home_id.0).await.unwrap();
+    for (idx, item) in reordered.iter().enumerate() {
+        let expected_canonical = ((idx + 1) * 10) as i32;
+        assert_eq!(
+            item.sort_order, expected_canonical,
+            "Gapped values must be canonicalized to {}",
+            expected_canonical
+        );
+    }
+
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+}
+
+#[tokio::test]
+async fn test_spa_sections_reorder_reverse_list_and_no_temp_values() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let repo = spa_sax_backend::infrastructure::repositories::spa_section_repository::SpaSectionRepository::new(&harness.pool);
+    let home_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    let active = repo.list_admin_for_page(home_id.0).await.unwrap();
+    let n = active.len();
+
+    // Reverse list: last item gets lowest order
+    let mut payload_items = Vec::new();
+    for (idx, item) in active.iter().enumerate() {
+        let reversed_order = ((n - idx) * 10) as i32;
+        payload_items.push(serde_json::json!({
+            "id": item.id,
+            "sort_order": reversed_order
+        }));
+    }
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/spa-sections/reorder")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&serde_json::json!({ "items": payload_items }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+
+    let reordered = repo.list_admin_for_page(home_id.0).await.unwrap();
+    assert_eq!(reordered[0].id, active[n - 1].id);
+    assert_eq!(reordered[n - 1].id, active[0].id);
+
+    // Assert NO temporary values (> 100_000 or negative) remain
+    let invalid_temp_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM spa_sections WHERE page_id = $1 AND (sort_order >= 100000 OR sort_order < 0)",
+    )
+    .bind(home_id.0)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        invalid_temp_count.0, 0,
+        "No temporary intermediate sort_order values may survive"
+    );
+
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+}
+
+#[tokio::test]
+async fn test_spa_sections_reorder_transaction_rollback() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let repo = spa_sax_backend::infrastructure::repositories::spa_section_repository::SpaSectionRepository::new(&harness.pool);
+    let home_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    let active_before = repo.list_admin_for_page(home_id.0).await.unwrap();
+
+    // Payload containing invalid foreign ID
+    let mut bad_payload = Vec::new();
+    for (idx, item) in active_before.iter().enumerate() {
+        let target_id = if idx == 0 {
+            uuid::Uuid::new_v4() // unknown foreign ID
+        } else {
+            item.id
+        };
+        bad_payload.push(serde_json::json!({
+            "id": target_id,
+            "sort_order": ((idx + 1) * 10) as i32
+        }));
+    }
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/spa-sections/reorder")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&serde_json::json!({ "items": bad_payload }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::UnprocessableEntity);
+
+    // Verify ordering in DB is completely untouched
+    let active_after_rollback = repo.list_admin_for_page(home_id.0).await.unwrap();
+    for (before, after) in active_before.iter().zip(active_after_rollback.iter()) {
+        assert_eq!(before.id, after.id);
+        assert_eq!(before.sort_order, after.sort_order);
+    }
+
     common::reset_home_sections_to_bootstrap(&harness.pool).await;
 }

@@ -54,8 +54,15 @@ BEGIN
 
         -- 5. Safely hide old default sections (our-works, festivals) on home page
         -- We do NOT delete them so any content blocks attached are preserved safely.
+        -- Update their sort_orders to 50 and 60 to prevent collisions with canonical sections (10..40).
         UPDATE spa_sections
-        SET is_visible = FALSE
+        SET is_visible = FALSE,
+            sort_order = CASE
+                WHEN section_key = 'our-works' THEN 50
+                WHEN section_key = 'festivals' THEN 60
+                ELSE sort_order + 100
+            END,
+            updated_at = NOW()
         WHERE page_id = v_page_id AND section_key IN ('our-works', 'festivals');
     END IF;
 END $$;

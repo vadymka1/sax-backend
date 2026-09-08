@@ -74,6 +74,7 @@ fn swagger_ui_redirect() -> Redirect {
         routes::media::get_media,
         routes::media::delete_media,
         routes::public::get_public_page,
+        routes::contact::submit_contact_form,
     ),
     components(
         schemas(
@@ -96,6 +97,7 @@ fn swagger_ui_redirect() -> Redirect {
             dto::UpdateContentBlockRequest,
             dto::ReorderContentBlockItem,
             dto::ReorderContentBlocksRequest,
+            dto::BlockAttachedMediaDto,
             dto::MediaResponseDto,
             dto::AdminMediaDto,
             dto::CreateYoutubeMediaRequest,
@@ -106,11 +108,15 @@ fn swagger_ui_redirect() -> Redirect {
             dto::PublicSpaSectionDto,
             dto::PublicContentBlockDto,
             dto::PublicMediaDto,
+            dto::ContactRequest,
+            dto::ContactResponse,
             routes::health::HealthStatusDto,
             routes::health::ReadinessStatusDto,
             routes::health::ReadinessCheckDetails,
             crate::domain::users::Role,
             crate::domain::sections::ContentBlockType,
+            crate::domain::sections::FontFamily,
+            crate::domain::sections::FontSize,
             crate::shared::pagination::PaginationMeta,
             crate::shared::errors::ApiErrorPayload,
             crate::shared::errors::ApiErrorDetails,
@@ -146,6 +152,20 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
         storage.clone(),
     ));
 
+    let contact_mailer: crate::application::services::DynContactMailer = if config.smtp.enabled {
+        Arc::new(crate::application::services::SmtpContactMailer::new(
+            config.smtp.clone(),
+        ))
+    } else {
+        Arc::new(crate::application::services::NoopContactMailer)
+    };
+
+    let contact_service = crate::application::services::ContactService::new(
+        pool.clone(),
+        contact_mailer,
+        config.smtp.clone(),
+    );
+
     let figment = rocket::Config::figment()
         .merge(("address", config.host.parse::<std::net::IpAddr>()?))
         .merge(("port", config.port));
@@ -155,6 +175,7 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
         .manage(pool)
         .manage(storage)
         .manage(public_page_service)
+        .manage(contact_service)
         .attach(crate::api::fairings::CorsFairing)
         .attach(SecurityHeadersFairing)
         .register(
@@ -191,6 +212,7 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
                 routes::media::get_media,
                 routes::media::delete_media,
                 routes::public::get_public_page,
+                routes::contact::submit_contact_form,
             ],
         )
         .mount(

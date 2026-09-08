@@ -20,6 +20,55 @@ pub struct AppConfig {
     pub public_media_base_url: String,
     pub max_image_upload_mb: u64,
     pub max_video_upload_mb: u64,
+    pub smtp: SmtpConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct SmtpConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub from_email: String,
+    pub from_name: String,
+    pub contact_notification_email: String,
+    pub starttls: bool,
+}
+
+impl SmtpConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        if self.host.trim().is_empty() {
+            return Err("SMTP_HOST must not be empty when SMTP_ENABLED=true".to_string());
+        }
+
+        if self.port == 0 {
+            return Err("SMTP_PORT must be greater than 0 when SMTP_ENABLED=true".to_string());
+        }
+
+        if self.from_email.trim().is_empty() {
+            return Err("SMTP_FROM_EMAIL must not be empty when SMTP_ENABLED=true".to_string());
+        }
+
+        let notification_email = if !self.contact_notification_email.trim().is_empty() {
+            &self.contact_notification_email
+        } else {
+            &self.from_email
+        };
+
+        if notification_email.trim().is_empty() {
+            return Err(
+                "CONTACT_NOTIFICATION_EMAIL or SMTP_FROM_EMAIL must not be empty when SMTP_ENABLED=true"
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl AppConfig {
@@ -82,6 +131,45 @@ impl AppConfig {
             .parse::<u64>()
             .map_err(|_| AppError::Internal("Invalid MAX_VIDEO_UPLOAD_MB".to_string()))?;
 
+        let smtp_enabled = env::var("SMTP_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse::<bool>()
+            .unwrap_or(false);
+        let smtp_host = env::var("SMTP_HOST").unwrap_or_default();
+        let smtp_port = env::var("SMTP_PORT")
+            .unwrap_or_else(|_| "587".to_string())
+            .parse::<u16>()
+            .unwrap_or(587);
+        let smtp_username = env::var("SMTP_USERNAME")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let smtp_password = env::var("SMTP_PASSWORD")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let smtp_from_email = env::var("SMTP_FROM_EMAIL").unwrap_or_default();
+        let smtp_from_name =
+            env::var("SMTP_FROM_NAME").unwrap_or_else(|_| "Ensti Sax Website".to_string());
+        let contact_notification_email = env::var("CONTACT_NOTIFICATION_EMAIL").unwrap_or_default();
+        let smtp_starttls = env::var("SMTP_STARTTLS")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse::<bool>()
+            .unwrap_or(true);
+
+        let smtp = SmtpConfig {
+            enabled: smtp_enabled,
+            host: smtp_host,
+            port: smtp_port,
+            username: smtp_username,
+            password: smtp_password,
+            from_email: smtp_from_email,
+            from_name: smtp_from_name,
+            contact_notification_email,
+            starttls: smtp_starttls,
+        };
+
+        smtp.validate()
+            .map_err(|e| AppError::Internal(format!("Invalid SMTP configuration: {}", e)))?;
+
         Ok(Self {
             env,
             host,
@@ -100,6 +188,7 @@ impl AppConfig {
             public_media_base_url,
             max_image_upload_mb,
             max_video_upload_mb,
+            smtp,
         })
     }
 }

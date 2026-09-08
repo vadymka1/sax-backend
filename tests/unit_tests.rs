@@ -289,6 +289,7 @@ mod tests {
             "/api/v1/admin/media",
             "/api/v1/admin/media/{id}",
             "/api/v1/public/page",
+            "/api/v1/public/contact",
         ];
 
         for path in expected_paths {
@@ -331,6 +332,7 @@ mod tests {
         // 6. Verify Public & Health Endpoints Do NOT Require bearer_auth
         let public_paths = vec![
             "/api/v1/public/page",
+            "/api/v1/public/contact",
             "/health",
             "/health/live",
             "/health/ready",
@@ -360,6 +362,11 @@ mod tests {
             "ApiErrorResponse",
             "Role",
             "ContentBlockType",
+            "FontFamily",
+            "FontSize",
+            "ContactRequest",
+            "ContactResponse",
+            "BlockAttachedMediaDto",
         ];
 
         for schema_name in required_schemas {
@@ -509,5 +516,194 @@ mod tests {
         // 2. GET /api-docs/openapi.json returns 404 in production
         let res_json = client.get("/api-docs/openapi.json").dispatch().await;
         assert_eq!(res_json.status(), Status::NotFound);
+    }
+
+    #[test]
+    fn test_typography_tokens() {
+        use spa_sax_backend::domain::sections::{FontFamily, FontSize};
+
+        // 1. Defaults
+        assert_eq!(FontFamily::default(), FontFamily::Sans);
+        assert_eq!(FontSize::default(), FontSize::Md);
+
+        // 2. Valid tokens parsing
+        assert_eq!(FontFamily::parse("sans"), Some(FontFamily::Sans));
+        assert_eq!(FontFamily::parse("serif"), Some(FontFamily::Serif));
+        assert_eq!(FontFamily::parse("display"), Some(FontFamily::Display));
+        assert_eq!(FontFamily::parse("mono"), Some(FontFamily::Mono));
+        assert_eq!(FontFamily::parse("comic-sans"), None);
+        assert_eq!(FontFamily::parse("arial"), None);
+
+        assert_eq!(FontSize::parse("sm"), Some(FontSize::Sm));
+        assert_eq!(FontSize::parse("md"), Some(FontSize::Md));
+        assert_eq!(FontSize::parse("lg"), Some(FontSize::Lg));
+        assert_eq!(FontSize::parse("xl"), Some(FontSize::Xl));
+        assert_eq!(FontSize::parse("2xl"), Some(FontSize::TwoXl));
+        assert_eq!(FontSize::parse("72px"), None);
+        assert_eq!(FontSize::parse("small"), None);
+
+        // 3. String representation
+        assert_eq!(FontFamily::Sans.as_str(), "sans");
+        assert_eq!(FontFamily::Serif.as_str(), "serif");
+        assert_eq!(FontFamily::Display.as_str(), "display");
+        assert_eq!(FontFamily::Mono.as_str(), "mono");
+
+        assert_eq!(FontSize::Sm.as_str(), "sm");
+        assert_eq!(FontSize::Md.as_str(), "md");
+        assert_eq!(FontSize::Lg.as_str(), "lg");
+        assert_eq!(FontSize::Xl.as_str(), "xl");
+        assert_eq!(FontSize::TwoXl.as_str(), "2xl");
+
+        // 4. JSON serialization and deserialization
+        assert_eq!(
+            serde_json::to_string(&FontFamily::Serif).unwrap(),
+            "\"serif\""
+        );
+        assert_eq!(serde_json::to_string(&FontSize::TwoXl).unwrap(), "\"2xl\"");
+        assert_eq!(
+            serde_json::from_str::<FontFamily>("\"display\"").unwrap(),
+            FontFamily::Display
+        );
+        assert_eq!(
+            serde_json::from_str::<FontSize>("\"lg\"").unwrap(),
+            FontSize::Lg
+        );
+        assert!(serde_json::from_str::<FontFamily>("\"impact\"").is_err());
+        assert!(serde_json::from_str::<FontSize>("\"32px\"").is_err());
+    }
+
+    #[test]
+    fn test_contact_form_validation() {
+        use spa_sax_backend::application::dto::ContactRequest;
+        use spa_sax_backend::application::services::ContactService;
+
+        // Valid contact request
+        let valid_req = ContactRequest {
+            name: "John Doe".to_string(),
+            email: "john.doe@example.com".to_string(),
+            subject: Some("Booking Festival".to_string()),
+            message: "Hello, I would like to book an event.".to_string(),
+        };
+        assert!(ContactService::validate_request(&valid_req).is_ok());
+
+        // Valid with optional subject as None
+        let valid_no_subj = ContactRequest {
+            name: "John Doe".to_string(),
+            email: "john.doe@example.com".to_string(),
+            subject: None,
+            message: "Hello, I would like to book an event.".to_string(),
+        };
+        assert!(ContactService::validate_request(&valid_no_subj).is_ok());
+
+        // Empty / whitespace name -> Error
+        let empty_name = ContactRequest {
+            name: "   ".to_string(),
+            email: "john@example.com".to_string(),
+            subject: None,
+            message: "Message here".to_string(),
+        };
+        assert!(ContactService::validate_request(&empty_name).is_err());
+
+        // Invalid email syntax -> Error
+        let invalid_emails = vec![
+            "plainaddress",
+            "@missingusername.com",
+            "username@.com",
+            "username@domain",
+            "username@domain..com",
+        ];
+        for bad_email in invalid_emails {
+            let req = ContactRequest {
+                name: "John".to_string(),
+                email: bad_email.to_string(),
+                subject: None,
+                message: "Message here".to_string(),
+            };
+            assert!(
+                ContactService::validate_request(&req).is_err(),
+                "Should reject invalid email: {}",
+                bad_email
+            );
+        }
+
+        // Empty message -> Error
+        let empty_msg = ContactRequest {
+            name: "John".to_string(),
+            email: "john@example.com".to_string(),
+            subject: None,
+            message: "  ".to_string(),
+        };
+        assert!(ContactService::validate_request(&empty_msg).is_err());
+
+        // Oversized message (>5000 chars) -> Error
+        let huge_msg = "a".repeat(5001);
+        let oversized = ContactRequest {
+            name: "John".to_string(),
+            email: "john@example.com".to_string(),
+            subject: None,
+            message: huge_msg,
+        };
+        assert!(ContactService::validate_request(&oversized).is_err());
+    }
+
+    #[test]
+    fn test_smtp_config_validation() {
+        use spa_sax_backend::config::SmtpConfig;
+
+        // 1. SMTP disabled: empty config is valid
+        let disabled_config = SmtpConfig {
+            enabled: false,
+            host: String::new(),
+            port: 0,
+            username: None,
+            password: None,
+            from_email: String::new(),
+            from_name: String::new(),
+            contact_notification_email: String::new(),
+            starttls: true,
+        };
+        assert!(disabled_config.validate().is_ok());
+
+        // 2. SMTP enabled + missing host -> error
+        let missing_host = SmtpConfig {
+            enabled: true,
+            host: "   ".to_string(),
+            port: 587,
+            username: None,
+            password: None,
+            from_email: "noreply@example.com".to_string(),
+            from_name: "Ensti Sax".to_string(),
+            contact_notification_email: "admin@example.com".to_string(),
+            starttls: true,
+        };
+        assert!(missing_host.validate().is_err());
+
+        // 3. SMTP enabled + missing from_email -> error
+        let missing_from_email = SmtpConfig {
+            enabled: true,
+            host: "smtp.example.com".to_string(),
+            port: 587,
+            username: None,
+            password: None,
+            from_email: "  ".to_string(),
+            from_name: "Ensti Sax".to_string(),
+            contact_notification_email: "admin@example.com".to_string(),
+            starttls: true,
+        };
+        assert!(missing_from_email.validate().is_err());
+
+        // 4. SMTP enabled + complete required config -> valid
+        let complete_config = SmtpConfig {
+            enabled: true,
+            host: "smtp.example.com".to_string(),
+            port: 587,
+            username: Some("user".to_string()),
+            password: Some("secret".to_string()),
+            from_email: "noreply@example.com".to_string(),
+            from_name: "Ensti Sax".to_string(),
+            contact_notification_email: "admin@example.com".to_string(),
+            starttls: true,
+        };
+        assert!(complete_config.validate().is_ok());
     }
 }

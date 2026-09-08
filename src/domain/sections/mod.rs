@@ -1,9 +1,11 @@
 pub mod spa_section;
+pub mod typography;
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 pub use spa_section::{generate_slug, validate_spa_section_key, SpaSection};
+pub use typography::{FontFamily, FontSize};
 
 pub type SectionType = ContentBlockType;
 

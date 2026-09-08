@@ -122,6 +122,17 @@ impl TestHarness {
             public_media_base_url: "http://localhost:8000/uploads".to_string(),
             max_image_upload_mb: 10,
             max_video_upload_mb: 100,
+            smtp: spa_sax_backend::config::SmtpConfig {
+                enabled: false,
+                host: "".to_string(),
+                port: 587,
+                username: None,
+                password: None,
+                from_email: "test@example.com".to_string(),
+                from_name: "Test".to_string(),
+                contact_notification_email: "test@example.com".to_string(),
+                starttls: false,
+            },
         });
         config.database_url = database_url;
         config.jwt_access_secret = jwt_secret.to_string();
@@ -210,33 +221,53 @@ pub async fn cleanup_spa_section(pool: &PgPool, section_id: uuid::Uuid) -> Resul
 }
 
 pub async fn reset_home_sections_to_bootstrap(pool: &PgPool) {
+    let canonical_ids = "('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666')";
+
+    sqlx::query(&format!(
+        "DELETE FROM section_media WHERE section_id IN (SELECT id FROM sections WHERE spa_section_id NOT IN {})",
+        canonical_ids
+    ))
+    .execute(pool)
+    .await
+    .ok();
+
+    sqlx::query(&format!(
+        "DELETE FROM sections WHERE spa_section_id NOT IN {}",
+        canonical_ids
+    ))
+    .execute(pool)
+    .await
+    .ok();
+
+    sqlx::query(&format!(
+        "DELETE FROM spa_sections WHERE page_id = (SELECT id FROM pages WHERE slug = 'home') AND id NOT IN {}",
+        canonical_ids
+    ))
+    .execute(pool)
+    .await
+    .ok();
+
+    // Ensure testimonials exists
     sqlx::query(
-        "DELETE FROM section_media WHERE section_id IN (SELECT id FROM sections WHERE spa_section_id NOT IN ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555'))"
+        "INSERT INTO spa_sections (id, page_id, section_key, title, navigation_label, sort_order, is_visible)
+         SELECT '66666666-6666-6666-6666-666666666666'::uuid, id, 'testimonials', 'Testimonials', 'Testimonials', 40, TRUE
+         FROM pages WHERE slug = 'home'
+         ON CONFLICT (page_id, section_key) DO UPDATE
+         SET sort_order = 40, is_visible = TRUE, deleted_at = NULL"
     )
     .execute(pool)
     .await
     .ok();
 
-    sqlx::query(
-        "DELETE FROM sections WHERE spa_section_id NOT IN ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555')"
-    )
-    .execute(pool)
-    .await
-    .ok();
+    // Ensure 4 canonical sections are visible with exact sort order
+    sqlx::query("UPDATE spa_sections SET sort_order = 10, is_visible = TRUE, deleted_at = NULL WHERE id = '11111111-1111-1111-1111-111111111111'").execute(pool).await.ok();
+    sqlx::query("UPDATE spa_sections SET sort_order = 20, is_visible = TRUE, deleted_at = NULL WHERE id = '44444444-4444-4444-4444-444444444444'").execute(pool).await.ok();
+    sqlx::query("UPDATE spa_sections SET sort_order = 30, is_visible = TRUE, deleted_at = NULL WHERE id = '55555555-5555-5555-5555-555555555555'").execute(pool).await.ok();
+    sqlx::query("UPDATE spa_sections SET sort_order = 40, is_visible = TRUE, deleted_at = NULL WHERE id = '66666666-6666-6666-6666-666666666666'").execute(pool).await.ok();
 
-    sqlx::query(
-        "DELETE FROM spa_sections WHERE page_id = (SELECT id FROM pages WHERE slug = 'home') AND id NOT IN ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555')"
-    )
-    .execute(pool)
-    .await
-    .ok();
-
-    sqlx::query(
-        "UPDATE spa_sections SET deleted_at = NULL, is_visible = TRUE WHERE id IN ('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555')"
-    )
-    .execute(pool)
-    .await
-    .ok();
+    // Ensure old defaults are hidden
+    sqlx::query("UPDATE spa_sections SET sort_order = 50, is_visible = FALSE, deleted_at = NULL WHERE id = '22222222-2222-2222-2222-222222222222'").execute(pool).await.ok();
+    sqlx::query("UPDATE spa_sections SET sort_order = 60, is_visible = FALSE, deleted_at = NULL WHERE id = '33333333-3333-3333-3333-333333333333'").execute(pool).await.ok();
 }
 
 pub async fn cleanup_test_user(pool: &PgPool, user_id: uuid::Uuid) -> Result<(), sqlx::Error> {

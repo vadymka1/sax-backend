@@ -324,7 +324,8 @@ impl<'a> SpaSectionRepository<'a> {
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        let db_ids_set: HashSet<Uuid> = active_rows.into_iter().map(|r| r.0).collect();
+        let active_ids: Vec<Uuid> = active_rows.into_iter().map(|r| r.0).collect();
+        let db_ids_set: HashSet<Uuid> = active_ids.iter().cloned().collect();
 
         // 2. Validate request item counts and uniqueness
         if items.len() != db_ids_set.len() {
@@ -339,7 +340,6 @@ impl<'a> SpaSectionRepository<'a> {
         }
 
         let mut req_ids_set = HashSet::new();
-        let mut req_orders_set = HashSet::new();
 
         for item in items {
             if item.sort_order < 0 {
@@ -362,25 +362,43 @@ impl<'a> SpaSectionRepository<'a> {
                     message: format!("Duplicate section ID in reorder request: {}", item.id),
                 }]));
             }
-
-            if !req_orders_set.insert(item.sort_order) {
-                return Err(AppError::ValidationError(vec![ApiErrorDetails {
-                    field: "items".to_string(),
-                    message: format!(
-                        "Duplicate sort_order in reorder request: {}",
-                        item.sort_order
-                    ),
-                }]));
-            }
         }
 
-        // 3. Batch update sort_orders
-        for item in items {
+        // 3. Deterministically canonicalize sort order using (sort_order, original_request_index) tie-breaking
+        let mut indexed_items: Vec<(usize, &ReorderSpaSectionItem)> =
+            items.iter().enumerate().collect();
+        indexed_items.sort_by(|(idx_a, item_a), (idx_b, item_b)| {
+            item_a
+                .sort_order
+                .cmp(&item_b.sort_order)
+                .then_with(|| idx_a.cmp(idx_b))
+        });
+        let final_ordered_ids: Vec<Uuid> =
+            indexed_items.into_iter().map(|(_, item)| item.id).collect();
+
+        // 4. Two-phase update to guarantee collision safety with check constraint (sort_order >= 0)
+        // Phase 1: assign temporary high positive values (1_000_000 + idx)
+        for (idx, id) in final_ordered_ids.iter().enumerate() {
+            let temp_order = 1_000_000 + (idx as i32);
             sqlx::query(
                 "UPDATE spa_sections SET sort_order = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND page_id = $3",
             )
-            .bind(item.sort_order)
-            .bind(item.id)
+            .bind(temp_order)
+            .bind(id)
+            .bind(page_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        // Phase 2: assign final canonical values (10, 20, 30, ...)
+        for (idx, id) in final_ordered_ids.iter().enumerate() {
+            let canonical_order = (idx as i32 + 1) * 10;
+            sqlx::query(
+                "UPDATE spa_sections SET sort_order = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND page_id = $3",
+            )
+            .bind(canonical_order)
+            .bind(id)
             .bind(page_id)
             .execute(&mut *tx)
             .await

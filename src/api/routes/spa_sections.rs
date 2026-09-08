@@ -182,7 +182,7 @@ pub async fn delete_spa_section(
 
 /// Reorder SPA sections
 ///
-/// Updates display sort order of SPA sections. Provided sort orders are authoritative. Requires authenticated super_admin or admin.
+/// Updates display sort order of SPA sections. Provided sort orders serve as ordering hints and are normalized into a canonical 10-step sequence. Requires authenticated super_admin or admin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/spa-sections/reorder",

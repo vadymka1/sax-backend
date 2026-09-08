@@ -2,11 +2,13 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub mod contact_dto;
 pub mod content_block_dto;
 pub mod media_dto;
 pub mod public_dto;
 pub mod spa_section_dto;
 pub mod youtube_dto;
+pub use contact_dto::*;
 pub use content_block_dto::*;
 pub use media_dto::*;
 pub use public_dto::*;

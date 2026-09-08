@@ -60,7 +60,7 @@ jobs:
         run: cargo run --bin migrate
 
       - name: Run Tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets -- --test-threads=1
 
       - name: Build Release Binary
         run: cargo build --release

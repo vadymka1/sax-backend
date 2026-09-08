@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod contact;
 pub mod content_blocks;
 pub mod health;
 pub mod media;

@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::domain::sections::ContentBlockType;
+use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BlockAttachedMediaDto {
     pub id: Uuid,
+    #[serde(rename = "type", alias = "media_type")]
     pub media_type: String,
     pub storage_provider: String,
     pub original_filename: Option<String>,
@@ -16,9 +17,12 @@ pub struct BlockAttachedMediaDto {
     pub file_size: Option<i64>,
     pub youtube_url: Option<String>,
     pub thumbnail_url: Option<String>,
+    pub url: Option<String>,
+    pub alt_text: Option<String>,
+    pub sort_order: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AdminContentBlockDto {
     pub id: Uuid,
     pub spa_section_id: Uuid,
@@ -27,7 +31,9 @@ pub struct AdminContentBlockDto {
     pub block_type: ContentBlockType,
     pub title: Option<String>,
     pub text: String,
-    pub media: Option<BlockAttachedMediaDto>,
+    pub media: Vec<BlockAttachedMediaDto>,
+    pub font_family: FontFamily,
+    pub font_size: FontSize,
     pub sort_order: i32,
     pub is_visible: bool,
     pub created_at: DateTime<Utc>,
@@ -41,6 +47,9 @@ pub struct CreateContentBlockRequest {
     pub title: Option<String>,
     pub text: String,
     pub media_id: Option<Uuid>,
+    pub media_ids: Option<Vec<Uuid>>,
+    pub font_family: Option<FontFamily>,
+    pub font_size: Option<FontSize>,
     pub is_visible: Option<bool>,
 }
 
@@ -51,16 +60,20 @@ pub struct UpdateContentBlockRequest {
     pub title: Option<String>,
     pub text: Option<String>,
     pub media_id: Option<Option<Uuid>>,
+    pub media_ids: Option<Option<Vec<Uuid>>>,
+    pub font_family: Option<FontFamily>,
+    pub font_size: Option<FontSize>,
     pub is_visible: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ReorderContentBlockItem {
     pub id: Uuid,
-    pub sort_order: i32,
+    #[serde(default)]
+    pub sort_order: Option<i32>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ReorderContentBlocksRequest {
     pub items: Vec<ReorderContentBlockItem>,
 }

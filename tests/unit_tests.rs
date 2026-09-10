@@ -706,4 +706,119 @@ mod tests {
         };
         assert!(complete_config.validate().is_ok());
     }
+
+    #[test]
+    fn test_testimonial_validation_rules() {
+        use spa_sax_backend::domain::testimonials::{
+            validate_author_name, validate_author_role, validate_sort_order, validate_text,
+            MAX_AUTHOR_NAME_LEN, MAX_AUTHOR_ROLE_LEN, MAX_TEXT_LEN,
+        };
+
+        // 1. Author Name validation
+        assert!(validate_author_name("").is_err());
+        assert!(validate_author_name("   ").is_err());
+        assert_eq!(
+            validate_author_name("  John Smith  ").unwrap(),
+            "John Smith"
+        );
+        let too_long_name = "a".repeat(MAX_AUTHOR_NAME_LEN + 1);
+        assert!(validate_author_name(&too_long_name).is_err());
+        let exact_max_name = "a".repeat(MAX_AUTHOR_NAME_LEN);
+        assert!(validate_author_name(&exact_max_name).is_ok());
+
+        // 2. Author Role validation
+        assert_eq!(validate_author_role(None).unwrap(), None);
+        assert_eq!(validate_author_role(Some("   ")).unwrap(), None);
+        assert_eq!(
+            validate_author_role(Some("  Festival Director  ")).unwrap(),
+            Some("Festival Director".to_string())
+        );
+        let too_long_role = "r".repeat(MAX_AUTHOR_ROLE_LEN + 1);
+        assert!(validate_author_role(Some(&too_long_role)).is_err());
+        let exact_max_role = "r".repeat(MAX_AUTHOR_ROLE_LEN);
+        assert!(validate_author_role(Some(&exact_max_role)).is_ok());
+
+        // 3. Text validation
+        assert!(validate_text("").is_err());
+        assert!(validate_text("   ").is_err());
+        assert_eq!(
+            validate_text("  Wonderful performance!  ").unwrap(),
+            "Wonderful performance!"
+        );
+        let too_long_text = "t".repeat(MAX_TEXT_LEN + 1);
+        assert!(validate_text(&too_long_text).is_err());
+        let exact_max_text = "t".repeat(MAX_TEXT_LEN);
+        assert!(validate_text(&exact_max_text).is_ok());
+
+        // 4. Sort Order validation
+        assert!(validate_sort_order(0).is_ok());
+        assert!(validate_sort_order(10).is_ok());
+        assert!(validate_sort_order(100).is_ok());
+        assert!(validate_sort_order(-1).is_err());
+    }
+
+    #[test]
+    fn test_testimonials_openapi_schema_regression() {
+        use spa_sax_backend::bootstrap::ApiDoc;
+        use utoipa::OpenApi;
+
+        let openapi = ApiDoc::openapi();
+
+        // 1. Verify paths exist
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/v1/admin/testimonials"),
+            "Missing path /api/v1/admin/testimonials"
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/v1/admin/testimonials/{id}"),
+            "Missing path /api/v1/admin/testimonials/{{id}}"
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/v1/admin/testimonials/reorder"),
+            "Missing path /api/v1/admin/testimonials/reorder"
+        );
+
+        // 2. Verify component schemas exist
+        let components = openapi.components.expect("Components must exist");
+        let schemas = &components.schemas;
+
+        let required_schemas = [
+            "AdminTestimonialDto",
+            "AdminTestimonialAvatarDto",
+            "CreateTestimonialRequest",
+            "UpdateTestimonialRequest",
+            "ReorderTestimonialItem",
+            "ReorderTestimonialsRequest",
+            "PublicTestimonialDto",
+            "PublicTestimonialAvatarDto",
+            "PublicPageResponse",
+        ];
+
+        for schema_name in required_schemas {
+            assert!(
+                schemas.contains_key(schema_name),
+                "Missing schema in OpenAPI components: {}",
+                schema_name
+            );
+        }
+
+        // 3. Verify PublicPageResponse has testimonials property
+        let public_page_schema = schemas
+            .get("PublicPageResponse")
+            .expect("PublicPageResponse schema must exist");
+        let schema_json = serde_json::to_string(public_page_schema).unwrap();
+        assert!(
+            schema_json.contains("testimonials"),
+            "PublicPageResponse must contain testimonials property"
+        );
+    }
 }

@@ -7,12 +7,14 @@ pub mod content_block_dto;
 pub mod media_dto;
 pub mod public_dto;
 pub mod spa_section_dto;
+pub mod testimonial_dto;
 pub mod youtube_dto;
 pub use contact_dto::*;
 pub use content_block_dto::*;
 pub use media_dto::*;
 pub use public_dto::*;
 pub use spa_section_dto::*;
+pub use testimonial_dto::*;
 pub use youtube_dto::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -325,9 +325,44 @@ impl PublicPageService {
             });
         }
 
+        // Query 4: Bounded query for visible non-deleted testimonials ordered deterministically
+        let testimonial_repo =
+            crate::infrastructure::repositories::testimonial_repository::TestimonialRepository::new(
+                &self.pool,
+            );
+        let testimonial_rows = testimonial_repo.list_public_visible().await?;
+
+        let testimonials: Vec<crate::application::dto::PublicTestimonialDto> = testimonial_rows
+            .into_iter()
+            .map(|row| {
+                let avatar = if let (Some(_), Some(key)) = (row.media_id, row.media_storage_key) {
+                    let trimmed = key.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(crate::application::dto::PublicTestimonialAvatarDto {
+                            url: self.storage.get_public_url(trimmed),
+                        })
+                    }
+                } else {
+                    None
+                };
+
+                crate::application::dto::PublicTestimonialDto {
+                    id: row.id,
+                    author_name: row.author_name,
+                    author_role: row.author_role,
+                    text: row.text,
+                    avatar,
+                    sort_order: row.sort_order,
+                }
+            })
+            .collect();
+
         Ok(PublicPageResponse {
             page: page_dto,
             sections,
+            testimonials,
         })
     }
 }

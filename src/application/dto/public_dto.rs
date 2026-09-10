@@ -57,8 +57,11 @@ pub struct PublicSpaSectionDto {
     pub blocks: Vec<PublicContentBlockDto>,
 }
 
+use crate::application::dto::testimonial_dto::PublicTestimonialDto;
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PublicPageResponse {
     pub page: PublicPageDto,
     pub sections: Vec<PublicSpaSectionDto>,
+    pub testimonials: Vec<PublicTestimonialDto>,
 }

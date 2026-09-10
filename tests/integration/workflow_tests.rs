@@ -5807,3 +5807,970 @@ async fn test_spa_sections_reorder_transaction_rollback() {
 
     common::reset_home_sections_to_bootstrap(&harness.pool).await;
 }
+
+#[tokio::test]
+async fn test_testimonials_migration_and_table_persistence() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    // 1. Verify testimonials table exists
+    let table_exists: (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'testimonials')",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert!(table_exists.0, "testimonials table MUST exist");
+
+    // 2. Insert direct row to prove persistence & constraints
+    let test_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO testimonials (id, author_name, author_role, text, sort_order, is_visible)
+        VALUES ($1, 'Test Author', 'Tester', 'Persistence test text', 10, TRUE)
+        "#,
+    )
+    .bind(test_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let row: (String, Option<String>, String, i32, bool) = sqlx::query_as(
+        "SELECT author_name, author_role, text, sort_order, is_visible FROM testimonials WHERE id = $1",
+    )
+    .bind(test_id)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row.0, "Test Author");
+    assert_eq!(row.1, Some("Tester".to_string()));
+    assert_eq!(row.2, "Persistence test text");
+    assert_eq!(row.3, 10);
+    assert!(row.4);
+
+    // 3. Test sort_order >= 0 constraint
+    let neg_res = sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, sort_order) VALUES ($1, 'Fail', 'Fail', -1)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .execute(&harness.pool)
+    .await;
+    assert!(
+        neg_res.is_err(),
+        "Negative sort order must fail DB constraint"
+    );
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_testimonials_admin_crud_lifecycle_and_avatar() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Create first testimonial (Section 38)
+    let res1 = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "John Smith",
+            "author_role": "Festival Director",
+            "text": "Wonderful performance.",
+            "is_visible": true
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res1.status(), Status::Created);
+    let dto1: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res1.into_json().await.unwrap();
+    let t1 = dto1.data;
+    assert_eq!(t1.author_name, "John Smith");
+    assert_eq!(t1.author_role, Some("Festival Director".to_string()));
+    assert_eq!(t1.text, "Wonderful performance.");
+    assert_eq!(t1.sort_order, 10);
+    assert!(t1.is_visible);
+    assert!(t1.avatar.is_none());
+
+    // 2. Create second testimonial to verify next canonical sort order (Section 39)
+    let res2 = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Jane Doe",
+            "author_role": "Jazz Producer",
+            "text": "Brilliant saxophone solo.",
+            "is_visible": true
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res2.status(), Status::Created);
+    let dto2: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res2.into_json().await.unwrap();
+    let t2 = dto2.data;
+    assert_eq!(t2.sort_order, 20);
+
+    // 3. List testimonials (Section 40)
+    let list_res = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(list_res.status(), Status::Ok);
+    let list_dto: SingleResponse<Vec<spa_sax_backend::application::dto::AdminTestimonialDto>> =
+        list_res.into_json().await.unwrap();
+    assert_eq!(list_dto.data.len(), 2);
+    assert_eq!(list_dto.data[0].id, t1.id);
+    assert_eq!(list_dto.data[0].sort_order, 10);
+    assert_eq!(list_dto.data[1].id, t2.id);
+    assert_eq!(list_dto.data[1].sort_order, 20);
+
+    // 4. Get by ID (Section 41)
+    let get_res = harness
+        .client
+        .get(format!("/api/v1/admin/testimonials/{}", t1.id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(get_res.status(), Status::Ok);
+
+    let get_unknown = harness
+        .client
+        .get(format!(
+            "/api/v1/admin/testimonials/{}",
+            uuid::Uuid::new_v4()
+        ))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(get_unknown.status(), Status::NotFound);
+
+    // 5. Update text fields (Section 42)
+    let patch_res = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t1.id))
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Johnathan Smith",
+            "author_role": "Senior Festival Director",
+            "text": "Extraordinary performance."
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(patch_res.status(), Status::Ok);
+    let patched_dto: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        patch_res.into_json().await.unwrap();
+    assert_eq!(patched_dto.data.author_name, "Johnathan Smith");
+    assert_eq!(
+        patched_dto.data.author_role,
+        Some("Senior Festival Director".to_string())
+    );
+    assert_eq!(patched_dto.data.text, "Extraordinary performance.");
+
+    // 6. Visibility update (Section 43)
+    let vis_res = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t2.id))
+        .header(auth_header.clone())
+        .json(&json!({
+            "is_visible": false
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(vis_res.status(), Status::Ok);
+    let vis_dto: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        vis_res.into_json().await.unwrap();
+    assert!(!vis_dto.data.is_visible);
+
+    // Admin list still contains hidden testimonial
+    let list_after_vis = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    let list_vis_dto: SingleResponse<Vec<spa_sax_backend::application::dto::AdminTestimonialDto>> =
+        list_after_vis.into_json().await.unwrap();
+    assert_eq!(list_vis_dto.data.len(), 2);
+
+    // 7. Avatar assignment with valid IMAGE media (Section 44)
+    let image_media_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO media_assets (id, media_type, storage_provider, storage_key, original_filename, stored_filename, mime_type, file_size, alt_text, status)
+        VALUES ($1, 'image', 'local', 'test_avatar.jpg', 'avatar.jpg', 'test_avatar.jpg', 'image/jpeg', 1024, 'John avatar', 'active')
+        "#,
+    )
+    .bind(image_media_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let avatar_patch = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t1.id))
+        .header(auth_header.clone())
+        .json(&json!({
+            "avatar_media_id": image_media_id
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(avatar_patch.status(), Status::Ok);
+    let avatar_dto: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        avatar_patch.into_json().await.unwrap();
+    assert!(avatar_dto.data.avatar.is_some());
+    let av = avatar_dto.data.avatar.unwrap();
+    assert_eq!(av.id, image_media_id);
+    assert!(av.url.contains("test_avatar.jpg"));
+    assert_eq!(av.alt_text, Some("John avatar".to_string()));
+
+    // 8. Remove avatar via null PATCH (Section 46)
+    let remove_avatar_patch = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t1.id))
+        .header(auth_header.clone())
+        .json(&json!({
+            "avatar_media_id": null
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(remove_avatar_patch.status(), Status::Ok);
+    let removed_av_dto: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        remove_avatar_patch.into_json().await.unwrap();
+    assert!(removed_av_dto.data.avatar.is_none());
+
+    // 9. Soft delete testimonial (Section 47)
+    let del_res = harness
+        .client
+        .delete(format!("/api/v1/admin/testimonials/{}", t1.id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(del_res.status(), Status::Ok);
+
+    // Verify GET by ID returns 404
+    let get_deleted = harness
+        .client
+        .get(format!("/api/v1/admin/testimonials/{}", t1.id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(get_deleted.status(), Status::NotFound);
+
+    // Verify admin list excludes soft deleted
+    let list_after_del = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    let list_del_dto: SingleResponse<Vec<spa_sax_backend::application::dto::AdminTestimonialDto>> =
+        list_after_del.into_json().await.unwrap();
+    assert_eq!(list_del_dto.data.len(), 1);
+    assert_eq!(list_del_dto.data[0].id, t2.id);
+
+    // Direct DB inspection confirms deleted_at is set
+    let del_check: (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT deleted_at FROM testimonials WHERE id = $1")
+            .bind(t1.id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert!(del_check.0.is_some());
+
+    common::cleanup_media(&harness.pool, image_media_id)
+        .await
+        .unwrap();
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_testimonials_avatar_validation_and_rejection() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Insert video and youtube assets
+    let video_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO media_assets (id, media_type, storage_provider, storage_key, mime_type, file_size, status)
+        VALUES ($1, 'video', 'local', 'video.mp4', 'video/mp4', 5000, 'active')
+        "#,
+    )
+    .bind(video_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let yt_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO media_assets (id, media_type, storage_provider, youtube_video_id, youtube_url, status)
+        VALUES ($1, 'youtube', 'local', 'dQw4w9WgXcQ', 'https://youtube.com/watch?v=dQw4w9WgXcQ', 'active')
+        "#,
+    )
+    .bind(yt_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 2. Reject video asset as avatar (Section 45)
+    let res_video = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Invalid Avatar Video",
+            "text": "Text",
+            "avatar_media_id": video_id
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_video.status(), Status::UnprocessableEntity);
+
+    // 3. Reject youtube asset as avatar (Section 45)
+    let res_yt = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Invalid Avatar YT",
+            "text": "Text",
+            "avatar_media_id": yt_id
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_yt.status(), Status::UnprocessableEntity);
+
+    // 4. Reject unknown UUID as avatar (Section 45)
+    let res_unknown = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Invalid Unknown UUID",
+            "text": "Text",
+            "avatar_media_id": uuid::Uuid::new_v4()
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_unknown.status(), Status::UnprocessableEntity);
+
+    // Ensure no testimonials were inserted
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM testimonials")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 0);
+
+    common::cleanup_media(&harness.pool, video_id)
+        .await
+        .unwrap();
+    common::cleanup_media(&harness.pool, yt_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_testimonials_reorder_full_matrix() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // Create A=10, B=20, C=30
+    let id_a = uuid::Uuid::new_v4();
+    let id_b = uuid::Uuid::new_v4();
+    let id_c = uuid::Uuid::new_v4();
+
+    for (id, name, order) in [
+        (id_a, "Testimonial A", 10),
+        (id_b, "Testimonial B", 20),
+        (id_c, "Testimonial C", 30),
+    ] {
+        sqlx::query(
+            "INSERT INTO testimonials (id, author_name, text, sort_order) VALUES ($1, $2, 'text', $3)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(order)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    }
+
+    // 1. Real Swap: send desired order B, A, C (Section 50)
+    let swap_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_b, "sort_order": 10 },
+                { "id": id_a, "sort_order": 20 },
+                { "id": id_c, "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(swap_res.status(), Status::Ok);
+
+    let rows_after_swap: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
+        "SELECT id, sort_order FROM testimonials WHERE deleted_at IS NULL ORDER BY sort_order ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows_after_swap[0], (id_b, 10));
+    assert_eq!(rows_after_swap[1], (id_a, 20));
+    assert_eq!(rows_after_swap[2], (id_c, 30));
+
+    // 2. Reorder Gaps: hints A=10, B=30, C=90 -> canonical 10, 20, 30 (Section 51)
+    let gaps_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_a, "sort_order": 10 },
+                { "id": id_b, "sort_order": 30 },
+                { "id": id_c, "sort_order": 90 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(gaps_res.status(), Status::Ok);
+
+    let rows_after_gaps: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
+        "SELECT id, sort_order FROM testimonials WHERE deleted_at IS NULL ORDER BY sort_order ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows_after_gaps[0], (id_a, 10));
+    assert_eq!(rows_after_gaps[1], (id_b, 20));
+    assert_eq!(rows_after_gaps[2], (id_c, 30));
+
+    // 3. Duplicate Sort Hints: A=10, B=10, C=10 -> Accepted & canonicalized by request order (Section 52)
+    let dup_hints_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_c, "sort_order": 10 },
+                { "id": id_b, "sort_order": 10 },
+                { "id": id_a, "sort_order": 10 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(dup_hints_res.status(), Status::Ok);
+
+    let rows_after_dup_hints: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
+        "SELECT id, sort_order FROM testimonials WHERE deleted_at IS NULL ORDER BY sort_order ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows_after_dup_hints[0], (id_c, 10));
+    assert_eq!(rows_after_dup_hints[1], (id_b, 20));
+    assert_eq!(rows_after_dup_hints[2], (id_a, 30));
+
+    // 4. Duplicate ID in request: A, A, C -> 422 (Section 53)
+    let dup_id_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_a, "sort_order": 10 },
+                { "id": id_a, "sort_order": 20 },
+                { "id": id_c, "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(dup_id_res.status(), Status::UnprocessableEntity);
+
+    // 5. Missing active testimonial ID: A, B (missing C) -> 422 (Section 54)
+    let missing_id_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_a, "sort_order": 10 },
+                { "id": id_b, "sort_order": 20 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(missing_id_res.status(), Status::UnprocessableEntity);
+
+    // 6. Unknown UUID -> 422 (Section 55)
+    let unknown_id_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_a, "sort_order": 10 },
+                { "id": id_b, "sort_order": 20 },
+                { "id": uuid::Uuid::new_v4(), "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(unknown_id_res.status(), Status::UnprocessableEntity);
+
+    // 7. Negative sort order -> 422 (Section 56)
+    let neg_sort_res = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": id_a, "sort_order": -1 },
+                { "id": id_b, "sort_order": 20 },
+                { "id": id_c, "sort_order": 30 }
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(neg_sort_res.status(), Status::UnprocessableEntity);
+
+    // 8. Transactional safety check: DB order is still C=10, B=20, A=30 (Section 57)
+    let rows_untouched: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
+        "SELECT id, sort_order FROM testimonials WHERE deleted_at IS NULL ORDER BY sort_order ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows_untouched[0], (id_c, 10));
+    assert_eq!(rows_untouched[1], (id_b, 20));
+    assert_eq!(rows_untouched[2], (id_a, 30));
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_public_page_testimonials_integration_and_visibility() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    // 1. Empty state: when no visible testimonials exist, testimonials is [] (Section 26 & 49)
+    let pub_res_empty = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res_empty.status(), Status::Ok);
+    let pub_dto_empty: SingleResponse<PublicPageResponse> =
+        pub_res_empty.into_json().await.unwrap();
+    assert!(pub_dto_empty.data.testimonials.is_empty());
+
+    // 2. Insert image asset for A
+    let img_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO media_assets (id, media_type, storage_provider, storage_key, original_filename, stored_filename, mime_type, file_size, status)
+        VALUES ($1, 'image', 'local', 'public_avatar.png', 'avatar.png', 'public_avatar.png', 'image/png', 2048, 'active')
+        "#,
+    )
+    .bind(img_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let id_a = uuid::Uuid::new_v4();
+    let id_b = uuid::Uuid::new_v4();
+    let id_c = uuid::Uuid::new_v4();
+
+    // Create A visible, B hidden, C visible (Section 48)
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, avatar_media_id, sort_order, is_visible) VALUES ($1, 'Author A', 'Text A', $2, 10, TRUE)",
+    )
+    .bind(id_a)
+    .bind(img_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible) VALUES ($1, 'Author B', 'Text B', 20, FALSE)",
+    )
+    .bind(id_b)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible) VALUES ($1, 'Author C', 'Text C', 30, TRUE)",
+    )
+    .bind(id_c)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 3. Public GET without auth token (Section 59)
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res.status(), Status::Ok);
+    let pub_dto: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+
+    // A and C included in order, B excluded
+    assert_eq!(pub_dto.data.testimonials.len(), 2);
+    assert_eq!(pub_dto.data.testimonials[0].id, id_a);
+    assert_eq!(pub_dto.data.testimonials[0].sort_order, 10);
+    assert!(pub_dto.data.testimonials[0].avatar.is_some());
+    assert!(pub_dto.data.testimonials[0]
+        .avatar
+        .as_ref()
+        .unwrap()
+        .url
+        .contains("public_avatar.png"));
+
+    assert_eq!(pub_dto.data.testimonials[1].id, id_c);
+    assert_eq!(pub_dto.data.testimonials[1].sort_order, 30);
+    assert!(pub_dto.data.testimonials[1].avatar.is_none());
+
+    // 4. Soft deleted media edge case (Section 60)
+    sqlx::query("UPDATE media_assets SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1")
+        .bind(img_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let pub_res_media_del = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res_media_del.status(), Status::Ok);
+    let pub_dto_media_del: SingleResponse<PublicPageResponse> =
+        pub_res_media_del.into_json().await.unwrap();
+    assert_eq!(pub_dto_media_del.data.testimonials.len(), 2);
+    assert_eq!(pub_dto_media_del.data.testimonials[0].id, id_a);
+    // Avatar safely resolves to null/None without crashing public page
+    assert!(pub_dto_media_del.data.testimonials[0].avatar.is_none());
+
+    common::cleanup_media(&harness.pool, img_id).await.unwrap();
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_testimonials_authorization_matrix() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    // 1. Create a regular admin user (role = admin)
+    let admin_id = uuid::Uuid::new_v4();
+    let admin_email = format!("normal_admin_{}@example.com", admin_id.simple());
+    let pass_hash = PasswordService::hash_password("NormalAdmin123!").unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO users (id, email, password_hash, display_name, role, is_active)
+        VALUES ($1, $2, $3, 'Normal Admin Testimonial Test', 'admin', TRUE)
+        "#,
+    )
+    .bind(admin_id)
+    .bind(&admin_email)
+    .bind(&pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let admin_token = spa_sax_backend::infrastructure::auth::TokenService::generate_access_token(
+        admin_id,
+        &admin_email,
+        Role::Admin,
+        "test_jwt_access_secret_key_min_32_bytes_123456",
+        900,
+    )
+    .unwrap();
+
+    let super_admin_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+    let normal_admin_header = Header::new("Authorization", format!("Bearer {}", admin_token));
+
+    // 2. Unauthenticated calls must return 401 (Section 58)
+    let unauth_list = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .dispatch()
+        .await;
+    assert_eq!(unauth_list.status(), Status::Unauthorized);
+
+    let unauth_create = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .json(&json!({ "author_name": "Unauth", "text": "Text" }))
+        .dispatch()
+        .await;
+    assert_eq!(unauth_create.status(), Status::Unauthorized);
+
+    let unauth_reorder = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .json(&json!({ "items": [] }))
+        .dispatch()
+        .await;
+    assert_eq!(unauth_reorder.status(), Status::Unauthorized);
+
+    // 3. Normal admin is ALLOWED to list & create testimonials (Section 58)
+    let admin_create = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(normal_admin_header.clone())
+        .json(&json!({
+            "author_name": "Created by Admin",
+            "text": "Admin text"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(admin_create.status(), Status::Created);
+
+    let admin_list = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .header(normal_admin_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(admin_list.status(), Status::Ok);
+
+    // 4. Super admin is ALLOWED to list & create testimonials (Section 58)
+    let super_admin_create = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(super_admin_header.clone())
+        .json(&json!({
+            "author_name": "Created by Super Admin",
+            "text": "Super Admin text"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(super_admin_create.status(), Status::Created);
+
+    let super_admin_list = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .header(super_admin_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(super_admin_list.status(), Status::Ok);
+
+    common::cleanup_test_user(&harness.pool, admin_id)
+        .await
+        .unwrap();
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_concurrent_testimonial_creation_allocates_unique_canonical_orders() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Minimum concurrency case (2 concurrent HTTP POSTs): start barrier synchronized
+    let barrier2 = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let b1 = barrier2.clone();
+    let b2 = barrier2.clone();
+
+    let post_a = async {
+        b1.wait().await;
+        harness
+            .client
+            .post("/api/v1/admin/testimonials")
+            .header(auth_header.clone())
+            .json(&json!({
+                "author_name": "Concurrent A",
+                "text": "Review A"
+            }))
+            .dispatch()
+            .await
+    };
+
+    let post_b = async {
+        b2.wait().await;
+        harness
+            .client
+            .post("/api/v1/admin/testimonials")
+            .header(auth_header.clone())
+            .json(&json!({
+                "author_name": "Concurrent B",
+                "text": "Review B"
+            }))
+            .dispatch()
+            .await
+    };
+
+    let (res_a, res_b) = tokio::join!(post_a, post_b);
+    assert_eq!(res_a.status(), Status::Created);
+    assert_eq!(res_b.status(), Status::Created);
+
+    let dto_a: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_a.into_json().await.unwrap();
+    let dto_b: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_b.into_json().await.unwrap();
+
+    assert_ne!(dto_a.data.id, dto_b.data.id);
+    assert_ne!(dto_a.data.sort_order, dto_b.data.sort_order);
+
+    let mut first_pair_orders = vec![dto_a.data.sort_order, dto_b.data.sort_order];
+    first_pair_orders.sort();
+    assert_eq!(first_pair_orders, vec![10, 20]);
+
+    // 2. Stronger concurrency case (6 additional concurrent creates reaching 8 total)
+    // Using tokio::task::JoinSet with real threadpool tasks and barrier synchronization
+    let auth_user = spa_sax_backend::api::guards::AuthenticatedUser {
+        id: harness.super_admin_id,
+        email: harness.super_admin_email.clone(),
+        display_name: "Super Admin Test".to_string(),
+        role: Role::SuperAdmin,
+        is_active: true,
+    };
+    let storage: std::sync::Arc<dyn spa_sax_backend::infrastructure::storage::StorageProvider> =
+        std::sync::Arc::new(
+            spa_sax_backend::infrastructure::storage::LocalStorageProvider::new(
+                "./uploads",
+                "http://localhost:8000/uploads".to_string(),
+            ),
+        );
+
+    let barrier6 = std::sync::Arc::new(tokio::sync::Barrier::new(6));
+    let mut set = tokio::task::JoinSet::new();
+
+    for i in 3..=8 {
+        let b = barrier6.clone();
+        let pool = harness.pool.clone();
+        let user = auth_user.clone();
+        let st = storage.clone();
+        set.spawn(async move {
+            b.wait().await;
+            let svc = spa_sax_backend::application::services::testimonial_service::TestimonialService::new(
+                &pool, st,
+            );
+            svc.create_testimonial(
+                &user,
+                spa_sax_backend::application::dto::CreateTestimonialRequest {
+                    author_name: format!("Concurrent Author {}", i),
+                    author_role: Some(format!("Role {}", i)),
+                    text: format!("Concurrent Review {}", i),
+                    avatar_media_id: None,
+                    is_visible: Some(true),
+                },
+            )
+            .await
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        let created = res.unwrap().expect("Concurrent create must succeed");
+        assert!(created.sort_order >= 10);
+    }
+
+    // 3. Explicitly assert that ALL 8 active sort_order values are unique and strictly canonical [10, 20, 30, 40, 50, 60, 70, 80]
+    let active_orders: Vec<(i32,)> = sqlx::query_as(
+        "SELECT sort_order FROM testimonials WHERE deleted_at IS NULL ORDER BY sort_order ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(active_orders.len(), 8);
+    let orders_vec: Vec<i32> = active_orders.into_iter().map(|r| r.0).collect();
+    assert_eq!(orders_vec, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+
+    let unique_set: std::collections::HashSet<i32> = orders_vec.iter().copied().collect();
+    assert_eq!(unique_set.len(), 8, "All sort_order values MUST be unique");
+
+    // 4. Sequential create regression check: next create must allocate 90
+    let res_seq = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Sequential 9th Author",
+            "text": "Sequential review"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_seq.status(), Status::Created);
+    let dto_seq: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_seq.into_json().await.unwrap();
+    assert_eq!(dto_seq.data.sort_order, 90);
+
+    // 5. Soft-delete behavior check: soft-delete 90, next create takes 90
+    let del_res = harness
+        .client
+        .delete(format!("/api/v1/admin/testimonials/{}", dto_seq.data.id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(del_res.status(), Status::Ok);
+
+    let res_after_del = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "New 9th Author After Delete",
+            "text": "Review after delete"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_after_del.status(), Status::Created);
+    let dto_after_del: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_after_del.into_json().await.unwrap();
+    assert_eq!(dto_after_del.data.sort_order, 90);
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}

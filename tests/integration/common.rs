@@ -292,3 +292,20 @@ pub async fn cleanup_media(pool: &PgPool, media_id: uuid::Uuid) -> Result<(), sq
 
     Ok(())
 }
+
+#[allow(dead_code)]
+pub async fn cleanup_all_testimonials(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM testimonials")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn cleanup_test_testimonial(pool: &PgPool, id: uuid::Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM testimonials WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

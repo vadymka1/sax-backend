@@ -821,4 +821,79 @@ mod tests {
             "PublicPageResponse must contain testimonials property"
         );
     }
+
+    #[test]
+    fn test_block_attached_media_dto_media_type_serialization_and_deserialization() {
+        use spa_sax_backend::application::dto::BlockAttachedMediaDto;
+        use uuid::Uuid;
+
+        let dto = BlockAttachedMediaDto {
+            id: Uuid::new_v4(),
+            media_type: "image".to_string(),
+            storage_provider: "local".to_string(),
+            original_filename: Some("photo.jpg".to_string()),
+            stored_filename: Some("photo_stored.jpg".to_string()),
+            mime_type: Some("image/jpeg".to_string()),
+            file_size: Some(2048),
+            youtube_url: None,
+            thumbnail_url: None,
+            url: Some("/uploads/photo_stored.jpg".to_string()),
+            alt_text: Some("Test photo".to_string()),
+            sort_order: 10,
+        };
+
+        // 1. Serialization MUST contain "media_type" and MUST NOT contain "type"
+        let json_val = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            json_val.get("media_type").and_then(|v| v.as_str()),
+            Some("image")
+        );
+        assert!(
+            json_val.get("type").is_none(),
+            "Serialized JSON must NOT contain 'type' field, found: {:?}",
+            json_val.get("type")
+        );
+
+        // 2. Deserialization from JSON with canonical "media_type"
+        let deserialized_canonical: BlockAttachedMediaDto =
+            serde_json::from_value(json_val.clone()).unwrap();
+        assert_eq!(deserialized_canonical.media_type, "image");
+
+        // 3. Deserialization backward compatibility from legacy JSON with "type"
+        let mut legacy_val = json_val;
+        if let Some(obj) = legacy_val.as_object_mut() {
+            obj.remove("media_type");
+            obj.insert("type".to_string(), serde_json::json!("image"));
+        }
+        let deserialized_legacy: BlockAttachedMediaDto =
+            serde_json::from_value(legacy_val).unwrap();
+        assert_eq!(deserialized_legacy.media_type, "image");
+    }
+
+    #[test]
+    fn test_block_attached_media_dto_openapi_schema_regression() {
+        use spa_sax_backend::bootstrap::ApiDoc;
+        use utoipa::OpenApi;
+
+        let openapi = ApiDoc::openapi();
+        let components = openapi.components.expect("Components must exist");
+        let schema = components
+            .schemas
+            .get("BlockAttachedMediaDto")
+            .expect("BlockAttachedMediaDto schema must exist");
+
+        let schema_val = serde_json::to_value(schema).unwrap();
+        let properties = schema_val
+            .get("properties")
+            .expect("Schema must have properties object");
+
+        assert!(
+            properties.get("media_type").is_some(),
+            "BlockAttachedMediaDto schema must declare 'media_type' property"
+        );
+        assert!(
+            properties.get("type").is_none(),
+            "BlockAttachedMediaDto schema must NOT declare legacy 'type' property"
+        );
+    }
 }

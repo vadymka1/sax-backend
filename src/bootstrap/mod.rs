@@ -234,6 +234,8 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
                 routes::testimonials::reorder_testimonials,
                 routes::public::get_public_page,
                 routes::contact::submit_contact_form,
+                routes::options::preflight_options,
+                routes::options::preflight_options_root,
             ],
         )
         .mount(

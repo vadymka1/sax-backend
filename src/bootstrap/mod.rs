@@ -84,6 +84,10 @@ fn swagger_ui_redirect() -> Redirect {
         routes::public::get_public_page,
         routes::public::submit_public_testimonial,
         routes::contact::submit_contact_form,
+        routes::contact::list_contact_messages,
+        routes::contact::get_contact_message,
+        routes::contact::mark_contact_message_read,
+        routes::contact::mark_contact_message_unread,
     ),
     components(
         schemas(
@@ -127,6 +131,7 @@ fn swagger_ui_redirect() -> Redirect {
             dto::PublicMediaDto,
             dto::ContactRequest,
             dto::ContactResponse,
+            dto::AdminContactMessageDto,
             dto::SubmitPublicTestimonialRequest,
             dto::SubmitPublicTestimonialResponse,
             routes::health::HealthStatusDto,
@@ -151,6 +156,7 @@ fn swagger_ui_redirect() -> Redirect {
         (name = "SPA Sections", description = "Dynamic SPA Sections Management"),
         (name = "Content Blocks", description = "Home Page Content Blocks CRUD"),
         (name = "Testimonials", description = "Persistent Testimonials Management & Ordering"),
+        (name = "Contact Messages", description = "Admin Contact Messages Inbox & Management"),
         (name = "Media", description = "Local File Uploads & YouTube Media"),
         (name = "Public", description = "Public Aggregated Website API"),
         (name = "Health", description = "Service Health Checks")
@@ -244,6 +250,10 @@ pub async fn build_rocket(config: AppConfig) -> Result<Rocket<Build>, Box<dyn st
                 routes::public::get_public_page,
                 routes::public::submit_public_testimonial,
                 routes::contact::submit_contact_form,
+                routes::contact::list_contact_messages,
+                routes::contact::get_contact_message,
+                routes::contact::mark_contact_message_read,
+                routes::contact::mark_contact_message_unread,
                 routes::options::preflight_options,
                 routes::options::preflight_options_root,
             ],

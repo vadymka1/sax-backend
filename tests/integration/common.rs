@@ -138,6 +138,7 @@ impl TestHarness {
         config.jwt_access_secret = jwt_secret.to_string();
         config.password_min_length = 6;
         config.local_storage_path = temp_dir.path().to_string_lossy().to_string();
+        config.smtp.enabled = false;
 
         let rocket = build_rocket(config.clone())
             .await

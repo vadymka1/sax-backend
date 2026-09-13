@@ -692,19 +692,189 @@ mod tests {
         };
         assert!(missing_from_email.validate().is_err());
 
-        // 4. SMTP enabled + complete required config -> valid
-        let complete_config = SmtpConfig {
+        // 4. SMTP enabled + missing contact_notification_email -> error
+        let missing_notification = SmtpConfig {
             enabled: true,
-            host: "smtp.example.com".to_string(),
-            port: 587,
-            username: Some("user".to_string()),
-            password: Some("secret".to_string()),
-            from_email: "noreply@example.com".to_string(),
-            from_name: "Ensti Sax".to_string(),
-            contact_notification_email: "admin@example.com".to_string(),
+            host: "sandbox.smtp.mailtrap.io".to_string(),
+            port: 2525,
+            username: Some("mailtrap_user".to_string()),
+            password: Some("mailtrap_pass".to_string()),
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "  ".to_string(),
             starttls: true,
         };
-        assert!(complete_config.validate().is_ok());
+        assert!(missing_notification.validate().is_err());
+
+        // 5. SMTP enabled + zero port -> error
+        let zero_port = SmtpConfig {
+            enabled: true,
+            host: "sandbox.smtp.mailtrap.io".to_string(),
+            port: 0,
+            username: None,
+            password: None,
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: true,
+        };
+        assert!(zero_port.validate().is_err());
+
+        // 6. SMTP enabled + Mailtrap Sandbox configuration (both credentials present) -> valid
+        let mailtrap_config = SmtpConfig {
+            enabled: true,
+            host: "sandbox.smtp.mailtrap.io".to_string(),
+            port: 2525,
+            username: Some("mailtrap_test_user".to_string()),
+            password: Some("mailtrap_test_secret".to_string()),
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: true,
+        };
+        assert!(mailtrap_config.validate().is_ok());
+
+        // 7. SMTP enabled + both credentials absent (generic unauthenticated SMTP) -> valid
+        let unauth_config = SmtpConfig {
+            enabled: true,
+            host: "smtp.internal.local".to_string(),
+            port: 25,
+            username: None,
+            password: None,
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: false,
+        };
+        assert!(unauth_config.validate().is_ok());
+
+        // 8. SMTP enabled + username only -> validation error (must NOT echo username)
+        let username_only = SmtpConfig {
+            enabled: true,
+            host: "sandbox.smtp.mailtrap.io".to_string(),
+            port: 2525,
+            username: Some("test-user-xyz".to_string()),
+            password: None,
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: true,
+        };
+        let err_u = username_only.validate().unwrap_err();
+        assert!(
+            !err_u.contains("test-user-xyz"),
+            "Error message must not echo username value: {}",
+            err_u
+        );
+        assert!(err_u.contains("configured together"));
+
+        // 9. SMTP enabled + password only -> validation error (must NOT echo secret)
+        let password_only = SmtpConfig {
+            enabled: true,
+            host: "sandbox.smtp.mailtrap.io".to_string(),
+            port: 2525,
+            username: None,
+            password: Some("super-secret-password-123".to_string()),
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: true,
+        };
+        let err_p = password_only.validate().unwrap_err();
+        assert!(
+            !err_p.contains("super-secret-password-123"),
+            "Error message must not echo password value: {}",
+            err_p
+        );
+        assert!(err_p.contains("configured together"));
+
+        // 10. SMTP enabled + empty/whitespace credentials -> normalized to absent (valid unauthenticated)
+        let whitespace_creds = SmtpConfig {
+            enabled: true,
+            host: "smtp.internal.local".to_string(),
+            port: 25,
+            username: Some("   ".to_string()),
+            password: Some("".to_string()),
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: false,
+        };
+        assert!(whitespace_creds.validate().is_ok());
+
+        // 11. SMTP enabled + username with whitespace password -> validation error
+        let mixed_whitespace = SmtpConfig {
+            enabled: true,
+            host: "sandbox.smtp.mailtrap.io".to_string(),
+            port: 2525,
+            username: Some("test-user".to_string()),
+            password: Some("   ".to_string()),
+            from_email: "hello@enstisax.local".to_string(),
+            from_name: "Ensti Sax Website".to_string(),
+            contact_notification_email: "dest@example.com".to_string(),
+            starttls: true,
+        };
+        assert!(mixed_whitespace.validate().is_err());
+
+        // 12. Security: Debug formatting redacts password and sensitive credentials
+        let debug_str = format!("{:?}", mailtrap_config);
+        assert!(
+            !debug_str.contains("mailtrap_test_secret"),
+            "Debug output must NOT contain plaintext password"
+        );
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "Debug output must contain [REDACTED] for sensitive fields"
+        );
+    }
+
+    #[test]
+    fn test_smtp_error_sanitization() {
+        use spa_sax_backend::application::services::ContactService;
+
+        let username = "mailtrap_user_99";
+        let password = "super_secret_smtp_password_xyz";
+
+        // 1. Password redaction
+        let raw_pass_err = format!("SMTP auth failure for password {}", password);
+        let sanitized_pass =
+            ContactService::sanitize_smtp_error(&raw_pass_err, None, Some(password));
+        assert!(
+            !sanitized_pass.contains(password),
+            "Sanitized error must not contain password"
+        );
+        assert!(sanitized_pass.contains("[REDACTED]"));
+
+        // 2. Username redaction
+        let raw_user_err = format!("SMTP connection refused for user {}", username);
+        let sanitized_user =
+            ContactService::sanitize_smtp_error(&raw_user_err, Some(username), None);
+        assert!(
+            !sanitized_user.contains(username),
+            "Sanitized error must not contain username"
+        );
+        assert!(sanitized_user.contains("[REDACTED]"));
+
+        // 3. Both credentials redaction
+        let raw_both_err = format!(
+            "Failed login: user '{}' with pass '{}' on relay",
+            username, password
+        );
+        let sanitized_both =
+            ContactService::sanitize_smtp_error(&raw_both_err, Some(username), Some(password));
+        assert!(!sanitized_both.contains(username));
+        assert!(!sanitized_both.contains(password));
+        assert!(sanitized_both.contains("[REDACTED]"));
+
+        // 4. Error length bound (500 chars max)
+        let long_raw = "A".repeat(1000);
+        let sanitized_long = ContactService::sanitize_smtp_error(&long_raw, None, None);
+        assert_eq!(sanitized_long.len(), 500);
+
+        // 5. Empty value safety: empty or whitespace credential does not corrupt error
+        let normal_msg = "Temporary failure in name resolution";
+        let safe_empty = ContactService::sanitize_smtp_error(normal_msg, Some("   "), Some(""));
+        assert_eq!(safe_empty, normal_msg);
     }
 
     #[test]

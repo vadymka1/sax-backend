@@ -23,7 +23,7 @@ pub struct AppConfig {
     pub smtp: SmtpConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SmtpConfig {
     pub enabled: bool,
     pub host: String,
@@ -34,6 +34,25 @@ pub struct SmtpConfig {
     pub from_name: String,
     pub contact_notification_email: String,
     pub starttls: bool,
+}
+
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("from_email", &self.from_email)
+            .field("from_name", &self.from_name)
+            .field(
+                "contact_notification_email",
+                &self.contact_notification_email,
+            )
+            .field("starttls", &self.starttls)
+            .finish()
+    }
 }
 
 impl SmtpConfig {
@@ -54,17 +73,30 @@ impl SmtpConfig {
             return Err("SMTP_FROM_EMAIL must not be empty when SMTP_ENABLED=true".to_string());
         }
 
-        let notification_email = if !self.contact_notification_email.trim().is_empty() {
-            &self.contact_notification_email
-        } else {
-            &self.from_email
-        };
-
-        if notification_email.trim().is_empty() {
+        if self.contact_notification_email.trim().is_empty() {
             return Err(
-                "CONTACT_NOTIFICATION_EMAIL or SMTP_FROM_EMAIL must not be empty when SMTP_ENABLED=true"
-                    .to_string(),
+                "CONTACT_NOTIFICATION_EMAIL must not be empty when SMTP_ENABLED=true".to_string(),
             );
+        }
+
+        let norm_username = self
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let norm_password = self
+            .password
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        match (norm_username, norm_password) {
+            (Some(_), Some(_)) | (None, None) => {}
+            _ => {
+                return Err(
+                    "SMTP_USERNAME and SMTP_PASSWORD must be configured together".to_string(),
+                );
+            }
         }
 
         Ok(())
@@ -73,7 +105,11 @@ impl SmtpConfig {
 
 impl AppConfig {
     pub fn from_env() -> AppResult<Self> {
-        dotenvy::dotenv().ok();
+        if let Err(err) = dotenvy::dotenv() {
+            if !err.not_found() {
+                eprintln!("Warning: Failed to parse .env file: {}", err);
+            }
+        }
 
         let env = env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
         let host = env::var("APP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -142,10 +178,12 @@ impl AppConfig {
             .unwrap_or(587);
         let smtp_username = env::var("SMTP_USERNAME")
             .ok()
-            .filter(|s| !s.trim().is_empty());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let smtp_password = env::var("SMTP_PASSWORD")
             .ok()
-            .filter(|s| !s.trim().is_empty());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let smtp_from_email = env::var("SMTP_FROM_EMAIL").unwrap_or_default();
         let smtp_from_name =
             env::var("SMTP_FROM_NAME").unwrap_or_else(|_| "Ensti Sax Website".to_string());

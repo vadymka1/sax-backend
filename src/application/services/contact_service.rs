@@ -1,10 +1,48 @@
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::application::dto::{ContactRequest, ContactResponse};
+use crate::api::guards::{ensure_role, AuthenticatedUser};
+use crate::application::dto::{AdminContactMessageDto, ContactRequest, ContactResponse};
 use crate::application::services::contact_mailer::DynContactMailer;
 use crate::config::SmtpConfig;
+use crate::domain::users::Role;
 use crate::shared::errors::{ApiErrorDetails, AppError, AppResult};
+
+#[derive(sqlx::FromRow)]
+struct ContactMessageRow {
+    id: Uuid,
+    name: String,
+    email: String,
+    subject: Option<String>,
+    message: String,
+    email_status: String,
+    email_error: Option<String>,
+    email_sent_at: Option<DateTime<Utc>>,
+    is_read: bool,
+    read_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<ContactMessageRow> for AdminContactMessageDto {
+    fn from(row: ContactMessageRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            email: row.email,
+            subject: row.subject,
+            message: row.message,
+            email_status: row.email_status,
+            email_error: row.email_error,
+            email_sent_at: row.email_sent_at,
+            is_read: row.is_read,
+            read_at: row.read_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
 
 pub struct ContactService {
     pool: PgPool,
@@ -19,6 +57,32 @@ impl ContactService {
             mailer,
             smtp_config,
         }
+    }
+
+    /// Sanitizes an SMTP error by redacting configured password and username,
+    /// and truncating to a bounded length (500 chars).
+    pub fn sanitize_smtp_error(
+        raw_error: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> String {
+        let mut sanitized = raw_error.to_string();
+
+        if let Some(pass) = password {
+            let trimmed = pass.trim();
+            if !trimmed.is_empty() {
+                sanitized = sanitized.replace(trimmed, "[REDACTED]");
+            }
+        }
+
+        if let Some(user) = username {
+            let trimmed = user.trim();
+            if !trimmed.is_empty() {
+                sanitized = sanitized.replace(trimmed, "[REDACTED]");
+            }
+        }
+
+        sanitized.chars().take(500).collect()
     }
 
     pub fn validate_request(req: &ContactRequest) -> AppResult<()> {
@@ -164,13 +228,11 @@ impl ContactService {
                     );
                 }
                 Err(e) => {
-                    let mut sanitized = e;
-                    if let Some(ref pass) = self.smtp_config.password {
-                        if !pass.is_empty() {
-                            sanitized = sanitized.replace(pass, "[REDACTED]");
-                        }
-                    }
-                    let safe_err: String = sanitized.chars().take(500).collect();
+                    let safe_err = Self::sanitize_smtp_error(
+                        &e,
+                        self.smtp_config.username.as_deref(),
+                        self.smtp_config.password.as_deref(),
+                    );
                     let _ = sqlx::query(
                         r#"
                         UPDATE contact_messages
@@ -214,5 +276,135 @@ impl ContactService {
             status: "success".to_string(),
             message: "Contact request submitted successfully".to_string(),
         })
+    }
+
+    /// List contact messages for admin inbox with optional filter: all, read, unread
+    pub async fn list_messages(
+        &self,
+        auth: &AuthenticatedUser,
+        status_filter: Option<&str>,
+    ) -> AppResult<Vec<AdminContactMessageDto>> {
+        ensure_role(auth, Role::Admin)?;
+
+        let rows: Vec<ContactMessageRow> = match status_filter {
+            Some("read") => {
+                sqlx::query_as::<_, ContactMessageRow>(
+                    r#"
+                    SELECT id, name, email, subject, message, email_status, email_error, email_sent_at, is_read, read_at, created_at, updated_at
+                    FROM contact_messages
+                    WHERE is_read = TRUE
+                    ORDER BY created_at DESC, id DESC
+                    "#,
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?
+            }
+            Some("unread") => {
+                sqlx::query_as::<_, ContactMessageRow>(
+                    r#"
+                    SELECT id, name, email, subject, message, email_status, email_error, email_sent_at, is_read, read_at, created_at, updated_at
+                    FROM contact_messages
+                    WHERE is_read = FALSE
+                    ORDER BY created_at DESC, id DESC
+                    "#,
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?
+            }
+            _ => {
+                sqlx::query_as::<_, ContactMessageRow>(
+                    r#"
+                    SELECT id, name, email, subject, message, email_status, email_error, email_sent_at, is_read, read_at, created_at, updated_at
+                    FROM contact_messages
+                    ORDER BY created_at DESC, id DESC
+                    "#,
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?
+            }
+        };
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Get single contact message by ID (does not auto-mark read)
+    pub async fn get_message(
+        &self,
+        auth: &AuthenticatedUser,
+        id: Uuid,
+    ) -> AppResult<AdminContactMessageDto> {
+        ensure_role(auth, Role::Admin)?;
+
+        let row: Option<ContactMessageRow> = sqlx::query_as::<_, ContactMessageRow>(
+            r#"
+            SELECT id, name, email, subject, message, email_status, email_error, email_sent_at, is_read, read_at, created_at, updated_at
+            FROM contact_messages
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        row.map(Into::into)
+            .ok_or_else(|| AppError::NotFound("Contact message not found".to_string()))
+    }
+
+    /// Mark message as read (idempotent)
+    pub async fn mark_as_read(
+        &self,
+        auth: &AuthenticatedUser,
+        id: Uuid,
+    ) -> AppResult<AdminContactMessageDto> {
+        ensure_role(auth, Role::Admin)?;
+
+        let row: Option<ContactMessageRow> = sqlx::query_as::<_, ContactMessageRow>(
+            r#"
+            UPDATE contact_messages
+            SET is_read = TRUE,
+                read_at = COALESCE(read_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING id, name, email, subject, message, email_status, email_error, email_sent_at, is_read, read_at, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        row.map(Into::into)
+            .ok_or_else(|| AppError::NotFound("Contact message not found".to_string()))
+    }
+
+    /// Mark message as unread (idempotent)
+    pub async fn mark_as_unread(
+        &self,
+        auth: &AuthenticatedUser,
+        id: Uuid,
+    ) -> AppResult<AdminContactMessageDto> {
+        ensure_role(auth, Role::Admin)?;
+
+        let row: Option<ContactMessageRow> = sqlx::query_as::<_, ContactMessageRow>(
+            r#"
+            UPDATE contact_messages
+            SET is_read = FALSE,
+                read_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING id, name, email, subject, message, email_status, email_error, email_sent_at, is_read, read_at, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        row.map(Into::into)
+            .ok_or_else(|| AppError::NotFound("Contact message not found".to_string()))
     }
 }

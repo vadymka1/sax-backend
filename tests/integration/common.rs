@@ -250,20 +250,21 @@ pub async fn reset_home_sections_to_bootstrap(pool: &PgPool) {
     // Ensure testimonials exists
     sqlx::query(
         "INSERT INTO spa_sections (id, page_id, section_key, title, navigation_label, sort_order, is_visible)
-         SELECT '66666666-6666-6666-6666-666666666666'::uuid, id, 'testimonials', 'Testimonials', 'Testimonials', 40, TRUE
+         SELECT '66666666-6666-6666-6666-666666666666'::uuid, id, 'testimonials', 'Testimonials', 'Testimonials', 30, TRUE
          FROM pages WHERE slug = 'home'
          ON CONFLICT (page_id, section_key) DO UPDATE
-         SET sort_order = 40, is_visible = TRUE, deleted_at = NULL"
+         SET sort_order = 30, is_visible = TRUE, deleted_at = NULL",
     )
     .execute(pool)
     .await
     .ok();
 
-    // Ensure 4 canonical sections are visible with exact sort order
+    // Ensure 4 canonical sections are visible with exact sort order:
+    // about-us (10), gallery (20), testimonials (30), contact-us (40)
     sqlx::query("UPDATE spa_sections SET sort_order = 10, is_visible = TRUE, deleted_at = NULL WHERE id = '11111111-1111-1111-1111-111111111111'").execute(pool).await.ok();
     sqlx::query("UPDATE spa_sections SET sort_order = 20, is_visible = TRUE, deleted_at = NULL WHERE id = '44444444-4444-4444-4444-444444444444'").execute(pool).await.ok();
-    sqlx::query("UPDATE spa_sections SET sort_order = 30, is_visible = TRUE, deleted_at = NULL WHERE id = '55555555-5555-5555-5555-555555555555'").execute(pool).await.ok();
-    sqlx::query("UPDATE spa_sections SET sort_order = 40, is_visible = TRUE, deleted_at = NULL WHERE id = '66666666-6666-6666-6666-666666666666'").execute(pool).await.ok();
+    sqlx::query("UPDATE spa_sections SET sort_order = 30, is_visible = TRUE, deleted_at = NULL WHERE id = '66666666-6666-6666-6666-666666666666'").execute(pool).await.ok();
+    sqlx::query("UPDATE spa_sections SET sort_order = 40, is_visible = TRUE, deleted_at = NULL WHERE id = '55555555-5555-5555-5555-555555555555'").execute(pool).await.ok();
 
     // Ensure old defaults are hidden
     sqlx::query("UPDATE spa_sections SET sort_order = 50, is_visible = FALSE, deleted_at = NULL WHERE id = '22222222-2222-2222-2222-222222222222'").execute(pool).await.ok();

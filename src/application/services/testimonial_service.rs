@@ -5,9 +5,12 @@ use uuid::Uuid;
 use crate::api::guards::AuthenticatedUser;
 use crate::application::dto::{
     AdminTestimonialAvatarDto, AdminTestimonialDto, CreateTestimonialRequest,
-    ReorderTestimonialsRequest, UpdateTestimonialRequest,
+    ReorderTestimonialsRequest, SubmitPublicTestimonialRequest, SubmitPublicTestimonialResponse,
+    UpdateTestimonialRequest,
 };
-use crate::domain::testimonials::{validate_author_name, validate_author_role, validate_text};
+use crate::domain::testimonials::{
+    validate_author_name, validate_author_role, validate_text, TestimonialModerationStatus,
+};
 use crate::domain::users::Role;
 use crate::infrastructure::repositories::testimonial_repository::{
     TestimonialRepository, TestimonialRowWithMedia,
@@ -86,6 +89,8 @@ impl<'a> TestimonialService<'a> {
             avatar,
             sort_order: row.sort_order,
             is_visible: row.is_visible,
+            moderation_status: row.moderation_status,
+            submission_source: row.submission_source,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -183,6 +188,92 @@ impl<'a> TestimonialService<'a> {
         Ok(self.map_row_to_admin_dto(row))
     }
 
+    pub async fn submit_public_testimonial(
+        &self,
+        req: SubmitPublicTestimonialRequest,
+    ) -> AppResult<SubmitPublicTestimonialResponse> {
+        let mut errors = Vec::new();
+
+        let clean_author_name = match validate_author_name(&req.author_name) {
+            Ok(name) => Some(name),
+            Err(msg) => {
+                errors.push(ApiErrorDetails {
+                    field: "author_name".to_string(),
+                    message: msg,
+                });
+                None
+            }
+        };
+
+        let clean_author_role = match validate_author_role(req.author_role.as_deref()) {
+            Ok(role) => role,
+            Err(msg) => {
+                errors.push(ApiErrorDetails {
+                    field: "author_role".to_string(),
+                    message: msg,
+                });
+                None
+            }
+        };
+
+        let clean_text = match validate_text(&req.text) {
+            Ok(txt) => Some(txt),
+            Err(msg) => {
+                errors.push(ApiErrorDetails {
+                    field: "text".to_string(),
+                    message: msg,
+                });
+                None
+            }
+        };
+
+        if !errors.is_empty() {
+            return Err(AppError::ValidationError(errors));
+        }
+
+        let repo = TestimonialRepository::new(self.pool);
+        let id = repo
+            .create_public(
+                &clean_author_name.unwrap(),
+                clean_author_role.as_deref(),
+                &clean_text.unwrap(),
+            )
+            .await?;
+
+        Ok(SubmitPublicTestimonialResponse {
+            id,
+            status: TestimonialModerationStatus::Pending,
+        })
+    }
+
+    pub async fn approve_testimonial(
+        &self,
+        auth: &AuthenticatedUser,
+        id: Uuid,
+    ) -> AppResult<AdminTestimonialDto> {
+        Self::check_admin_access(auth)?;
+        let repo = TestimonialRepository::new(self.pool);
+        let row = repo
+            .approve(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Testimonial not found".to_string()))?;
+        Ok(self.map_row_to_admin_dto(row))
+    }
+
+    pub async fn reject_testimonial(
+        &self,
+        auth: &AuthenticatedUser,
+        id: Uuid,
+    ) -> AppResult<AdminTestimonialDto> {
+        Self::check_admin_access(auth)?;
+        let repo = TestimonialRepository::new(self.pool);
+        let row = repo
+            .reject(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Testimonial not found".to_string()))?;
+        Ok(self.map_row_to_admin_dto(row))
+    }
+
     pub async fn update_testimonial(
         &self,
         auth: &AuthenticatedUser,
@@ -240,6 +331,23 @@ impl<'a> TestimonialService<'a> {
 
         if !errors.is_empty() {
             return Err(AppError::ValidationError(errors));
+        }
+
+        // Service guard: prevent setting is_visible = true for non-approved testimonials
+        if req.is_visible == Some(true) {
+            let repo = TestimonialRepository::new(self.pool);
+            let existing = repo.find_by_id(id).await?;
+            match existing {
+                Some(row) => {
+                    if row.moderation_status != TestimonialModerationStatus::Approved {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "is_visible".to_string(),
+                            message: "Cannot set is_visible to true for a testimonial that is not approved".to_string(),
+                        }]));
+                    }
+                }
+                None => return Err(AppError::NotFound("Testimonial not found".to_string())),
+            }
         }
 
         // Validate avatar media if provided

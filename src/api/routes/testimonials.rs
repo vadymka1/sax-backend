@@ -218,3 +218,79 @@ pub async fn reorder_testimonials(
         .await?;
     Ok(Status::Ok)
 }
+
+/// Approve testimonial
+///
+/// Approves a pending or rejected testimonial and assigns it the next canonical sort order. Requires authenticated super_admin or admin.
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/testimonials/{id}/approve",
+    tag = "Testimonials",
+    params(
+        ("id" = Uuid, Path, description = "Testimonial UUID identifier")
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Testimonial approved successfully", body = SingleResponse<AdminTestimonialDto>),
+        (status = 422, description = "Invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "Testimonial not found", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
+)]
+#[rocket::post("/admin/testimonials/<id_str>/approve")]
+pub async fn approve_testimonial(
+    auth: AuthenticatedUser,
+    id_str: &str,
+    db: &State<PgPool>,
+    storage: &State<Arc<dyn StorageProvider>>,
+) -> AppResult<Json<SingleResponse<AdminTestimonialDto>>> {
+    let id = Uuid::parse_str(id_str).map_err(|_| {
+        AppError::ValidationError(vec![ApiErrorDetails {
+            field: "id".to_string(),
+            message: "Invalid testimonial ID".to_string(),
+        }])
+    })?;
+    let service = TestimonialService::new(db.inner(), (*storage).clone());
+    let dto = service.approve_testimonial(&auth, id).await?;
+    Ok(Json(SingleResponse { data: dto }))
+}
+
+/// Reject testimonial
+///
+/// Rejects a testimonial and hides it from public display. Requires authenticated super_admin or admin.
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/testimonials/{id}/reject",
+    tag = "Testimonials",
+    params(
+        ("id" = Uuid, Path, description = "Testimonial UUID identifier")
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Testimonial rejected successfully", body = SingleResponse<AdminTestimonialDto>),
+        (status = 422, description = "Invalid UUID path parameter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid Bearer access token", body = ApiErrorResponse),
+        (status = 403, description = "Forbidden - Requires super_admin or admin role", body = ApiErrorResponse),
+        (status = 404, description = "Testimonial not found", body = ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = ApiErrorResponse)
+    )
+)]
+#[rocket::post("/admin/testimonials/<id_str>/reject")]
+pub async fn reject_testimonial(
+    auth: AuthenticatedUser,
+    id_str: &str,
+    db: &State<PgPool>,
+    storage: &State<Arc<dyn StorageProvider>>,
+) -> AppResult<Json<SingleResponse<AdminTestimonialDto>>> {
+    let id = Uuid::parse_str(id_str).map_err(|_| {
+        AppError::ValidationError(vec![ApiErrorDetails {
+            field: "id".to_string(),
+            message: "Invalid testimonial ID".to_string(),
+        }])
+    })?;
+    let service = TestimonialService::new(db.inner(), (*storage).clone());
+    let dto = service.reject_testimonial(&auth, id).await?;
+    Ok(Json(SingleResponse { data: dto }))
+}

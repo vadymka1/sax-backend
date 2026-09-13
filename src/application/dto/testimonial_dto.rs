@@ -3,6 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::domain::testimonials::{TestimonialModerationStatus, TestimonialSubmissionSource};
+
 pub fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
@@ -27,8 +29,23 @@ pub struct AdminTestimonialDto {
     pub avatar: Option<AdminTestimonialAvatarDto>,
     pub sort_order: i32,
     pub is_visible: bool,
+    pub moderation_status: TestimonialModerationStatus,
+    pub submission_source: TestimonialSubmissionSource,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SubmitPublicTestimonialRequest {
+    pub author_name: String,
+    pub author_role: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SubmitPublicTestimonialResponse {
+    pub id: Uuid,
+    pub status: TestimonialModerationStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -8,7 +8,7 @@ use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BlockAttachedMediaDto {
     pub id: Uuid,
-    #[serde(rename = "type", alias = "media_type")]
+    #[serde(alias = "type")]
     pub media_type: String,
     pub storage_provider: String,
     pub original_filename: Option<String>,

@@ -6774,3 +6774,210 @@ async fn test_concurrent_testimonial_creation_allocates_unique_canonical_orders(
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_content_block_media_dto_response_contract_uses_media_type() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let token = harness.super_admin_token.clone();
+    let auth_header = Header::new("Authorization", format!("Bearer {}", token));
+
+    // 1. Create a SPA section via admin API
+    let sec_res: SingleResponse<AdminSpaSectionDto> = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(auth_header.clone())
+        .json(&serde_json::json!({ "title": "Media Contract Section" }))
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+    let sec_id = sec_res.data.id;
+
+    // 2. Insert media asset fixture
+    let media_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO media_assets (id, media_type, storage_provider, original_filename, stored_filename, mime_type, file_size, status)
+         VALUES ($1, 'image', 'local', 'test_contract.jpg', 'test_contract.jpg', 'image/jpeg', 2048, 'active')"
+    )
+    .bind(media_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 3. Create text_image content block with the media asset
+    let create_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(auth_header.clone())
+        .json(&serde_json::json!({
+            "spa_section_id": sec_id,
+            "block_type": "text_image",
+            "title": "Block with Image",
+            "text": "Checking media_type response serialization contract",
+            "media_id": media_id
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(create_res.status(), Status::Created);
+
+    // 4. Query GET /api/v1/admin/content-blocks?spa_section_id=<sec_id>
+    let list_res = harness
+        .client
+        .get(format!(
+            "/api/v1/admin/content-blocks?spa_section_id={}",
+            sec_id
+        ))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(list_res.status(), Status::Ok);
+
+    let raw_body: serde_json::Value = list_res.into_json().await.unwrap();
+    let blocks = raw_body["data"].as_array().expect("data must be an array");
+    assert_eq!(blocks.len(), 1, "Expected exactly 1 block");
+
+    let block = &blocks[0];
+    let media_array = block["media"].as_array().expect("media must be an array");
+    assert_eq!(media_array.len(), 1, "Expected 1 attached media item");
+
+    let first_media = &media_array[0];
+
+    // Assert canonical "media_type" is serialized
+    assert_eq!(
+        first_media["media_type"].as_str(),
+        Some("image"),
+        "media_type must be 'image'"
+    );
+
+    // Assert legacy "type" field is ABSENT from response JSON
+    assert!(
+        first_media.get("type").is_none(),
+        "Response JSON must NOT contain 'type' field, found: {:?}",
+        first_media.get("type")
+    );
+
+    // Also verify get single content-block endpoint
+    let single_res = harness
+        .client
+        .get(format!(
+            "/api/v1/admin/content-blocks/{}",
+            block["id"].as_str().unwrap()
+        ))
+        .header(auth_header)
+        .dispatch()
+        .await;
+    assert_eq!(single_res.status(), Status::Ok);
+
+    let single_body: serde_json::Value = single_res.into_json().await.unwrap();
+    let single_media = &single_body["data"]["media"][0];
+    assert_eq!(single_media["media_type"].as_str(), Some("image"));
+    assert!(
+        single_media.get("type").is_none(),
+        "Single block response JSON must NOT contain 'type' field"
+    );
+}
+
+#[tokio::test]
+async fn test_options_preflight_testimonials_and_content_blocks_with_query_string() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // 1. OPTIONS /api/v1/admin/testimonials with allowed origin http://localhost:5173
+    let res_testimonials = harness
+        .client
+        .req(Method::Options, "/api/v1/admin/testimonials")
+        .header(Header::new("Origin", "http://localhost:5173"))
+        .header(Header::new("Access-Control-Request-Method", "GET"))
+        .header(Header::new(
+            "Access-Control-Request-Headers",
+            "Authorization, Content-Type",
+        ))
+        .dispatch()
+        .await;
+
+    assert_eq!(
+        res_testimonials.status(),
+        Status::NoContent,
+        "Preflight OPTIONS /admin/testimonials must return 204 No Content"
+    );
+    assert_eq!(
+        res_testimonials
+            .headers()
+            .get_one("Access-Control-Allow-Origin"),
+        Some("http://localhost:5173")
+    );
+    assert_eq!(res_testimonials.headers().get_one("Vary"), Some("Origin"));
+    let allow_methods = res_testimonials
+        .headers()
+        .get_one("Access-Control-Allow-Methods")
+        .unwrap_or_default();
+    assert!(allow_methods.contains("GET"));
+    assert!(allow_methods.contains("OPTIONS"));
+    let allow_headers = res_testimonials
+        .headers()
+        .get_one("Access-Control-Allow-Headers")
+        .unwrap_or_default();
+    assert!(allow_headers.contains("Authorization"));
+    assert!(allow_headers.contains("Content-Type"));
+
+    // 2. OPTIONS /api/v1/admin/content-blocks?spa_section_id=<uuid> with query string
+    let test_uuid = uuid::Uuid::new_v4();
+    let res_query = harness
+        .client
+        .req(
+            Method::Options,
+            format!("/api/v1/admin/content-blocks?spa_section_id={}", test_uuid),
+        )
+        .header(Header::new("Origin", "http://localhost:5173"))
+        .header(Header::new("Access-Control-Request-Method", "POST"))
+        .header(Header::new(
+            "Access-Control-Request-Headers",
+            "Authorization, Content-Type",
+        ))
+        .dispatch()
+        .await;
+
+    assert_eq!(
+        res_query.status(),
+        Status::NoContent,
+        "Preflight OPTIONS with query string must match route and return 204 No Content"
+    );
+    assert_eq!(
+        res_query.headers().get_one("Access-Control-Allow-Origin"),
+        Some("http://localhost:5173")
+    );
+
+    // 3. OPTIONS /api/v1/admin/spa-sections
+    let res_sections = harness
+        .client
+        .req(Method::Options, "/api/v1/admin/spa-sections")
+        .header(Header::new("Origin", "http://localhost:5173"))
+        .header(Header::new("Access-Control-Request-Method", "GET"))
+        .dispatch()
+        .await;
+    assert_eq!(res_sections.status(), Status::NoContent);
+
+    // 4. Disallowed origin preflight must return 403 Forbidden and NOT expose Access-Control-Allow-Origin
+    let res_disallowed = harness
+        .client
+        .req(Method::Options, "/api/v1/admin/testimonials")
+        .header(Header::new("Origin", "http://disallowed-attacker.com"))
+        .header(Header::new("Access-Control-Request-Method", "GET"))
+        .dispatch()
+        .await;
+
+    assert_eq!(
+        res_disallowed.status(),
+        Status::Forbidden,
+        "Disallowed origin preflight must return 403 Forbidden"
+    );
+    assert!(
+        res_disallowed
+            .headers()
+            .get_one("Access-Control-Allow-Origin")
+            .is_none(),
+        "Disallowed origin must NOT receive Access-Control-Allow-Origin header"
+    );
+}

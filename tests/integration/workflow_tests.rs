@@ -48,8 +48,8 @@ async fn test_home_page_migration_exists() {
         vec![
             "about-us",
             "gallery",
-            "contact-us",
             "testimonials",
+            "contact-us",
             "our-works",
             "festivals"
         ]
@@ -1092,8 +1092,8 @@ async fn test_post_suite_home_bootstrap_verification() {
         vec![
             "about-us",
             "gallery",
-            "contact-us",
             "testimonials",
+            "contact-us",
             "our-works",
             "festivals"
         ]
@@ -6221,7 +6221,7 @@ async fn test_testimonials_reorder_full_matrix() {
         (id_c, "Testimonial C", 30),
     ] {
         sqlx::query(
-            "INSERT INTO testimonials (id, author_name, text, sort_order) VALUES ($1, $2, 'text', $3)",
+            "INSERT INTO testimonials (id, author_name, text, sort_order, moderation_status) VALUES ($1, $2, 'text', $3, 'approved')",
         )
         .bind(id)
         .bind(name)
@@ -6422,7 +6422,7 @@ async fn test_public_page_testimonials_integration_and_visibility() {
 
     // Create A visible, B hidden, C visible (Section 48)
     sqlx::query(
-        "INSERT INTO testimonials (id, author_name, text, avatar_media_id, sort_order, is_visible) VALUES ($1, 'Author A', 'Text A', $2, 10, TRUE)",
+        "INSERT INTO testimonials (id, author_name, text, avatar_media_id, sort_order, is_visible, moderation_status) VALUES ($1, 'Author A', 'Text A', $2, 10, TRUE, 'approved')",
     )
     .bind(id_a)
     .bind(img_id)
@@ -6431,7 +6431,7 @@ async fn test_public_page_testimonials_integration_and_visibility() {
     .unwrap();
 
     sqlx::query(
-        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible) VALUES ($1, 'Author B', 'Text B', 20, FALSE)",
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible, moderation_status) VALUES ($1, 'Author B', 'Text B', 20, FALSE, 'approved')",
     )
     .bind(id_b)
     .execute(&harness.pool)
@@ -6439,7 +6439,7 @@ async fn test_public_page_testimonials_integration_and_visibility() {
     .unwrap();
 
     sqlx::query(
-        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible) VALUES ($1, 'Author C', 'Text C', 30, TRUE)",
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible, moderation_status) VALUES ($1, 'Author C', 'Text C', 30, TRUE, 'approved')",
     )
     .bind(id_c)
     .execute(&harness.pool)
@@ -6980,4 +6980,1172 @@ async fn test_options_preflight_testimonials_and_content_blocks_with_query_strin
             .is_none(),
         "Disallowed origin must NOT receive Access-Control-Allow-Origin header"
     );
+}
+
+#[tokio::test]
+async fn test_public_testimonial_submission_and_validation() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    // 1. Unauthenticated public submission succeeds with 201 Created
+    let valid_payload = json!({
+        "author_name": "John Public",
+        "author_role": "Festival Director",
+        "text": "Amazing musical performance at the summer gala!"
+    });
+
+    let res = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&valid_payload)
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Created);
+    let body: SingleResponse<spa_sax_backend::application::dto::SubmitPublicTestimonialResponse> =
+        res.into_json().await.unwrap();
+    assert_eq!(
+        body.data.status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Pending
+    );
+    let submitted_id = body.data.id;
+
+    // 2. Direct DB verification: server-controlled values
+    let (mod_status, sub_source, is_vis, sort_ord, avatar_id): (
+        String,
+        String,
+        bool,
+        i32,
+        Option<uuid::Uuid>,
+    ) = sqlx::query_as(
+        "SELECT moderation_status, submission_source, is_visible, sort_order, avatar_media_id FROM testimonials WHERE id = $1",
+    )
+    .bind(submitted_id)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(mod_status, "pending");
+    assert_eq!(sub_source, "public");
+    assert!(
+        !is_vis,
+        "Public submission must default to is_visible = false"
+    );
+    assert_eq!(
+        sort_ord, 0,
+        "Public pending submission must have sort_order = 0"
+    );
+    assert!(
+        avatar_id.is_none(),
+        "Public submission must have avatar_media_id = null"
+    );
+
+    // 3. Mass-assignment regression: extra fields must not override server-controlled defaults
+    let malicious_payload = json!({
+        "author_name": "Malicious Submitter",
+        "author_role": "Attacker",
+        "text": "Trying to bypass moderation",
+        "moderation_status": "approved",
+        "submission_source": "admin",
+        "is_visible": true,
+        "sort_order": 10,
+        "avatar_media_id": uuid::Uuid::new_v4()
+    });
+
+    let res_malicious = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&malicious_payload)
+        .dispatch()
+        .await;
+
+    assert_eq!(res_malicious.status(), Status::Created);
+    let body_malicious: SingleResponse<
+        spa_sax_backend::application::dto::SubmitPublicTestimonialResponse,
+    > = res_malicious.into_json().await.unwrap();
+    assert_eq!(
+        body_malicious.data.status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Pending
+    );
+
+    let (m_status, m_source, m_vis, m_ord): (String, String, bool, i32) = sqlx::query_as(
+        "SELECT moderation_status, submission_source, is_visible, sort_order FROM testimonials WHERE id = $1",
+    )
+    .bind(body_malicious.data.id)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(m_status, "pending", "moderation_status must remain pending");
+    assert_eq!(m_source, "public", "submission_source must remain public");
+    assert!(!m_vis, "is_visible must remain false");
+    assert_eq!(m_ord, 0, "sort_order must remain 0");
+
+    // 4. Public validation tests: 422 UnprocessableEntity
+    // Empty author_name
+    let res_empty_author = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "", "text": "Valid text" }))
+        .dispatch()
+        .await;
+    assert_eq!(res_empty_author.status(), Status::UnprocessableEntity);
+
+    // Whitespace author_name
+    let res_ws_author = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "   ", "text": "Valid text" }))
+        .dispatch()
+        .await;
+    assert_eq!(res_ws_author.status(), Status::UnprocessableEntity);
+
+    // author_name > 120 chars
+    let res_long_author = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "a".repeat(121), "text": "Valid text" }))
+        .dispatch()
+        .await;
+    assert_eq!(res_long_author.status(), Status::UnprocessableEntity);
+
+    // Empty text
+    let res_empty_text = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "Valid Author", "text": "" }))
+        .dispatch()
+        .await;
+    assert_eq!(res_empty_text.status(), Status::UnprocessableEntity);
+
+    // Whitespace text
+    let res_ws_text = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "Valid Author", "text": "   " }))
+        .dispatch()
+        .await;
+    assert_eq!(res_ws_text.status(), Status::UnprocessableEntity);
+
+    // text > 3000 chars
+    let res_long_text = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "Valid Author", "text": "a".repeat(3001) }))
+        .dispatch()
+        .await;
+    assert_eq!(res_long_text.status(), Status::UnprocessableEntity);
+
+    // author_role > 160 chars
+    let res_long_role = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({
+            "author_name": "Valid Author",
+            "author_role": "a".repeat(161),
+            "text": "Valid text"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_long_role.status(), Status::UnprocessableEntity);
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_testimonial_moderation_lifecycle_and_public_page_filtering() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Admin creates T1 (approved, visible = true)
+    let res_t1 = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Admin Author T1",
+            "text": "Admin approved visible review",
+            "is_visible": true
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_t1.status(), Status::Created);
+    let t1: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_t1.into_json().await.unwrap();
+    assert_eq!(
+        t1.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Approved
+    );
+    assert_eq!(
+        t1.data.submission_source,
+        spa_sax_backend::domain::testimonials::TestimonialSubmissionSource::Admin
+    );
+    assert!(t1.data.is_visible);
+    assert_eq!(t1.data.sort_order, 10);
+
+    // 2. Admin creates T4 (approved, visible = false)
+    let res_t4 = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Admin Author T4",
+            "text": "Admin approved hidden review",
+            "is_visible": false
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_t4.status(), Status::Created);
+    let t4: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_t4.into_json().await.unwrap();
+    assert_eq!(
+        t4.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Approved
+    );
+    assert!(!t4.data.is_visible);
+
+    // 3. Public submits T2 (pending)
+    let res_t2 = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({
+            "author_name": "Public Author T2",
+            "text": "Pending public review"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_t2.status(), Status::Created);
+    let t2_resp: SingleResponse<
+        spa_sax_backend::application::dto::SubmitPublicTestimonialResponse,
+    > = res_t2.into_json().await.unwrap();
+    let t2_id = t2_resp.data.id;
+
+    // 4. Public submits T3 (will be rejected)
+    let res_t3 = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({
+            "author_name": "Public Author T3",
+            "text": "To be rejected public review"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_t3.status(), Status::Created);
+    let t3_resp: SingleResponse<
+        spa_sax_backend::application::dto::SubmitPublicTestimonialResponse,
+    > = res_t3.into_json().await.unwrap();
+    let t3_id = t3_resp.data.id;
+
+    // 5. Admin list endpoint returns all active rows (T1, T4, T2, T3) with correct status & source
+    let res_admin_list = harness
+        .client
+        .get("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_admin_list.status(), Status::Ok);
+    let admin_list: SingleResponse<Vec<spa_sax_backend::application::dto::AdminTestimonialDto>> =
+        res_admin_list.into_json().await.unwrap();
+    assert_eq!(admin_list.data.len(), 4);
+
+    let t2_admin = admin_list.data.iter().find(|t| t.id == t2_id).unwrap();
+    assert_eq!(
+        t2_admin.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Pending
+    );
+    assert_eq!(
+        t2_admin.submission_source,
+        spa_sax_backend::domain::testimonials::TestimonialSubmissionSource::Public
+    );
+    assert!(!t2_admin.is_visible);
+    assert_eq!(t2_admin.sort_order, 0);
+
+    // 6. Public page filter: ONLY T1 must appear (approved + is_visible=true)
+    let res_public = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(res_public.status(), Status::Ok);
+    let public_page: SingleResponse<PublicPageResponse> = res_public.into_json().await.unwrap();
+    assert_eq!(
+        public_page.data.testimonials.len(),
+        1,
+        "Only approved AND visible testimonials must appear on public page"
+    );
+    assert_eq!(public_page.data.testimonials[0].id, t1.data.id);
+
+    // 7. Reject T3: POST /api/v1/admin/testimonials/{id}/reject
+    let res_reject = harness
+        .client
+        .post(format!("/api/v1/admin/testimonials/{}/reject", t3_id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_reject.status(), Status::Ok);
+    let rejected_dto: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_reject.into_json().await.unwrap();
+    assert_eq!(
+        rejected_dto.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Rejected
+    );
+    assert!(!rejected_dto.data.is_visible);
+    assert_eq!(rejected_dto.data.sort_order, 0);
+
+    // Public page still has only T1
+    let res_public_after_reject = harness.client.get("/api/v1/public/page").dispatch().await;
+    let public_page2: SingleResponse<PublicPageResponse> =
+        res_public_after_reject.into_json().await.unwrap();
+    assert_eq!(public_page2.data.testimonials.len(), 1);
+
+    // 8. Service guard test: attempting to PATCH is_visible=true on pending (T2) or rejected (T3) returns 422
+    let res_guard_pending = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t2_id))
+        .header(auth_header.clone())
+        .json(&json!({ "is_visible": true }))
+        .dispatch()
+        .await;
+    assert_eq!(
+        res_guard_pending.status(),
+        Status::UnprocessableEntity,
+        "Cannot set is_visible=true on pending testimonial"
+    );
+
+    let res_guard_rejected = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t3_id))
+        .header(auth_header.clone())
+        .json(&json!({ "is_visible": true }))
+        .dispatch()
+        .await;
+    assert_eq!(
+        res_guard_rejected.status(),
+        Status::UnprocessableEntity,
+        "Cannot set is_visible=true on rejected testimonial"
+    );
+
+    // Admin can still edit content/avatar of pending testimonial without changing status
+    let res_edit_pending = harness
+        .client
+        .patch(format!("/api/v1/admin/testimonials/{}", t2_id))
+        .header(auth_header.clone())
+        .json(&json!({ "author_name": "Edited Public Author T2" }))
+        .dispatch()
+        .await;
+    assert_eq!(res_edit_pending.status(), Status::Ok);
+    let edited_pending: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_edit_pending.into_json().await.unwrap();
+    assert_eq!(edited_pending.data.author_name, "Edited Public Author T2");
+    assert_eq!(
+        edited_pending.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Pending
+    );
+
+    // 9. Approve T2: POST /api/v1/admin/testimonials/{id}/approve
+    let res_approve = harness
+        .client
+        .post(format!("/api/v1/admin/testimonials/{}/approve", t2_id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_approve.status(), Status::Ok);
+    let approved_t2: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_approve.into_json().await.unwrap();
+    assert_eq!(
+        approved_t2.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Approved
+    );
+    assert!(approved_t2.data.is_visible);
+    // T1 has sort_order 10, T4 has sort_order 20. Next approved sort order is 30!
+    assert_eq!(approved_t2.data.sort_order, 30);
+
+    // Public page now includes T1 and T2 in order!
+    let res_public3 = harness.client.get("/api/v1/public/page").dispatch().await;
+    let public_page3: SingleResponse<PublicPageResponse> = res_public3.into_json().await.unwrap();
+    assert_eq!(public_page3.data.testimonials.len(), 2);
+    assert_eq!(public_page3.data.testimonials[0].id, t1.data.id);
+    assert_eq!(public_page3.data.testimonials[1].id, t2_id);
+
+    // 10. Approve idempotency: calling approve again returns OK without changing sort_order
+    let res_approve_again = harness
+        .client
+        .post(format!("/api/v1/admin/testimonials/{}/approve", t2_id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_approve_again.status(), Status::Ok);
+    let approved_again: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_approve_again.into_json().await.unwrap();
+    assert_eq!(approved_again.data.sort_order, 30);
+
+    // 11. Approve after reject: approve rejected T3
+    let res_approve_rejected = harness
+        .client
+        .post(format!("/api/v1/admin/testimonials/{}/approve", t3_id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_approve_rejected.status(), Status::Ok);
+    let approved_t3: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_approve_rejected.into_json().await.unwrap();
+    assert_eq!(
+        approved_t3.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Approved
+    );
+    assert!(approved_t3.data.is_visible);
+    // Next canonical slot is 40
+    assert_eq!(approved_t3.data.sort_order, 40);
+
+    // Public page now includes T1, T2, T3!
+    let res_public4 = harness.client.get("/api/v1/public/page").dispatch().await;
+    let public_page4: SingleResponse<PublicPageResponse> = res_public4.into_json().await.unwrap();
+    assert_eq!(public_page4.data.testimonials.len(), 3);
+    assert_eq!(public_page4.data.testimonials[2].id, t3_id);
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_concurrent_testimonial_approval_and_admin_create() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // Pre-seed 1 approved admin testimonial (sort_order = 10)
+    let res_seed = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({
+            "author_name": "Seed Author",
+            "text": "Initial review",
+            "is_visible": true
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(res_seed.status(), Status::Created);
+    let seed_dto: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_seed.into_json().await.unwrap();
+    assert_eq!(seed_dto.data.sort_order, 10);
+
+    // Submit 2 public pending testimonials
+    let res_p1 = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "Pending 1", "text": "Review 1" }))
+        .dispatch()
+        .await;
+    let p1: SingleResponse<spa_sax_backend::application::dto::SubmitPublicTestimonialResponse> =
+        res_p1.into_json().await.unwrap();
+
+    let res_p2 = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "Pending 2", "text": "Review 2" }))
+        .dispatch()
+        .await;
+    let p2: SingleResponse<spa_sax_backend::application::dto::SubmitPublicTestimonialResponse> =
+        res_p2.into_json().await.unwrap();
+
+    // Concurrently:
+    // 1. Approve P1
+    // 2. Approve P2
+    // 3. Admin create new testimonial
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
+    let b3 = barrier.clone();
+
+    let p1_id = p1.data.id;
+    let p2_id = p2.data.id;
+    let auth_h1 = auth_header.clone();
+    let auth_h2 = auth_header.clone();
+    let auth_h3 = auth_header.clone();
+
+    let task_approve_1 = async {
+        b1.wait().await;
+        harness
+            .client
+            .post(format!("/api/v1/admin/testimonials/{}/approve", p1_id))
+            .header(auth_h1)
+            .dispatch()
+            .await
+    };
+
+    let task_approve_2 = async {
+        b2.wait().await;
+        harness
+            .client
+            .post(format!("/api/v1/admin/testimonials/{}/approve", p2_id))
+            .header(auth_h2)
+            .dispatch()
+            .await
+    };
+
+    let task_admin_create = async {
+        b3.wait().await;
+        harness
+            .client
+            .post("/api/v1/admin/testimonials")
+            .header(auth_h3)
+            .json(&json!({
+                "author_name": "Concurrent Admin Creator",
+                "text": "Concurrent admin review",
+                "is_visible": true
+            }))
+            .dispatch()
+            .await
+    };
+
+    let (res1, res2, res3) = tokio::join!(task_approve_1, task_approve_2, task_admin_create);
+    assert_eq!(res1.status(), Status::Ok);
+    assert_eq!(res2.status(), Status::Ok);
+    assert_eq!(res3.status(), Status::Created);
+
+    // Verify all 4 rows in DB have unique canonical sort orders: [10, 20, 30, 40]
+    let active_orders: Vec<(i32,)> = sqlx::query_as(
+        "SELECT sort_order FROM testimonials WHERE deleted_at IS NULL AND moderation_status = 'approved' ORDER BY sort_order ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(active_orders.len(), 4);
+    let orders_vec: Vec<i32> = active_orders.into_iter().map(|r| r.0).collect();
+    assert_eq!(
+        orders_vec,
+        vec![10, 20, 30, 40],
+        "Concurrent approval and admin create must coordinate on the shared advisory lock and allocate strictly canonical [10, 20, 30, 40]"
+    );
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_testimonial_reorder_only_approved_set() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Admin creates 3 approved testimonials: A (10), B (20), C (30)
+    let res_a = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({ "author_name": "A", "text": "Review A" }))
+        .dispatch()
+        .await;
+    let a: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_a.into_json().await.unwrap();
+
+    let res_b = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({ "author_name": "B", "text": "Review B" }))
+        .dispatch()
+        .await;
+    let b: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_b.into_json().await.unwrap();
+
+    let res_c = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header.clone())
+        .json(&json!({ "author_name": "C", "text": "Review C" }))
+        .dispatch()
+        .await;
+    let c: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        res_c.into_json().await.unwrap();
+
+    // 2. Public submits pending testimonial P
+    let res_p = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({ "author_name": "Pending P", "text": "Review P" }))
+        .dispatch()
+        .await;
+    let p: SingleResponse<spa_sax_backend::application::dto::SubmitPublicTestimonialResponse> =
+        res_p.into_json().await.unwrap();
+    let p_id = p.data.id;
+
+    // 3. Reorder only the approved set [C, A, B] without mentioning P -> MUST succeed
+    let reorder_approved = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": c.data.id, "sort_order": 10 },
+                { "id": a.data.id, "sort_order": 20 },
+                { "id": b.data.id, "sort_order": 30 },
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(reorder_approved.status(), Status::Ok);
+
+    // Verify P is still pending with sort_order = 0
+    let p_order: (i32,) = sqlx::query_as("SELECT sort_order FROM testimonials WHERE id = $1")
+        .bind(p_id)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    assert_eq!(p_order.0, 0);
+
+    // 4. Reorder attempt including pending ID P -> MUST return 422 UnprocessableEntity
+    let reorder_with_pending = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": c.data.id, "sort_order": 10 },
+                { "id": a.data.id, "sort_order": 20 },
+                { "id": b.data.id, "sort_order": 30 },
+                { "id": p_id, "sort_order": 40 },
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(
+        reorder_with_pending.status(),
+        Status::UnprocessableEntity,
+        "Including pending testimonial in reorder must return 422"
+    );
+
+    // 5. Soft delete A: deleting A removes it from approved active set
+    let del_a = harness
+        .client
+        .delete(format!("/api/v1/admin/testimonials/{}", a.data.id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(del_a.status(), Status::Ok);
+
+    // Reordering remaining approved set [B, C] succeeds
+    let reorder_remaining = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": b.data.id, "sort_order": 10 },
+                { "id": c.data.id, "sort_order": 20 },
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(reorder_remaining.status(), Status::Ok);
+
+    // Deleted A cannot be reordered
+    let reorder_with_deleted = harness
+        .client
+        .post("/api/v1/admin/testimonials/reorder")
+        .header(auth_header.clone())
+        .json(&json!({
+            "items": [
+                { "id": b.data.id, "sort_order": 10 },
+                { "id": c.data.id, "sort_order": 20 },
+                { "id": a.data.id, "sort_order": 30 },
+            ]
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(reorder_with_deleted.status(), Status::UnprocessableEntity);
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_canonical_section_order_and_custom_section_preservation() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // 1. Seed a custom SPA section on home page to prove it is preserved
+    let page: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    let custom_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO spa_sections (id, page_id, section_key, title, navigation_label, sort_order, is_visible)
+         VALUES ($1, $2, 'custom-promo', 'Special Promo', 'Promo', 99, TRUE)"
+    )
+    .bind(custom_id)
+    .bind(page.0)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 2. Query all active sections for home page ordered by sort_order
+    let sections: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT section_key, sort_order, title FROM spa_sections WHERE page_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC",
+    )
+    .bind(page.0)
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+
+    // Verify canonical section orders:
+    // about-us = 10
+    // gallery = 20
+    // testimonials = 30
+    // contact-us = 40
+    let about = sections.iter().find(|s| s.0 == "about-us").unwrap();
+    let gallery = sections.iter().find(|s| s.0 == "gallery").unwrap();
+    let testimonials = sections.iter().find(|s| s.0 == "testimonials").unwrap();
+    let contact = sections.iter().find(|s| s.0 == "contact-us").unwrap();
+
+    assert_eq!(about.1, 10, "about-us sort_order must be 10");
+    assert_eq!(gallery.1, 20, "gallery sort_order must be 20");
+    assert_eq!(testimonials.1, 30, "testimonials sort_order must be 30");
+    assert_eq!(contact.1, 40, "contact-us sort_order must be 40");
+    assert!(
+        contact.1 > testimonials.1,
+        "contact-us MUST be after testimonials"
+    );
+
+    // Verify custom section remains present and intact
+    let custom = sections.iter().find(|s| s.0 == "custom-promo").unwrap();
+    assert_eq!(custom.1, 99);
+    assert_eq!(custom.2, "Special Promo");
+
+    // 3. Verify public page returns sections in proper canonical order
+    let res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(res.status(), Status::Ok);
+    let public_data: SingleResponse<PublicPageResponse> = res.into_json().await.unwrap();
+
+    // Filter to canonical section keys in the public response
+    let canonical_public_keys: Vec<&str> = public_data
+        .data
+        .sections
+        .iter()
+        .map(|s| s.key.as_str())
+        .filter(|k| ["about-us", "gallery", "testimonials", "contact-us"].contains(k))
+        .collect();
+
+    assert_eq!(
+        canonical_public_keys,
+        vec!["about-us", "gallery", "testimonials", "contact-us"],
+        "Public page canonical sections MUST be ordered: about-us (10), gallery (20), testimonials (30), contact-us (40)"
+    );
+
+    // Cleanup custom section
+    sqlx::query("DELETE FROM spa_sections WHERE id = $1")
+        .bind(custom_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_pre_v2_testimonial_migration_backfill_upgrade() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+
+    // 1. Revert testimonials table to exact pre-V2 (V1.1) schema
+    // Drop moderation columns, check constraints, and V2 partial index
+    sqlx::raw_sql(
+        r#"
+        ALTER TABLE testimonials DROP CONSTRAINT IF EXISTS testimonials_moderation_status_check;
+        ALTER TABLE testimonials DROP CONSTRAINT IF EXISTS testimonials_submission_source_check;
+        DROP INDEX IF EXISTS idx_testimonials_moderation_status;
+        DROP INDEX IF EXISTS idx_testimonials_public;
+        ALTER TABLE testimonials DROP COLUMN IF EXISTS moderation_status;
+        ALTER TABLE testimonials DROP COLUMN IF EXISTS submission_source;
+        CREATE INDEX IF NOT EXISTS idx_testimonials_public ON testimonials (sort_order ASC, id ASC)
+        WHERE deleted_at IS NULL AND is_visible = TRUE;
+        "#,
+    )
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Verify columns do NOT exist
+    let col_check: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'testimonials' AND column_name IN ('moderation_status', 'submission_source')"
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        col_check.0, 0,
+        "Pre-V2 schema MUST NOT have moderation columns"
+    );
+
+    // 2. Insert pre-V2 historical testimonials (without moderation columns)
+    let id_vis = uuid::Uuid::new_v4();
+    let id_hidden = uuid::Uuid::new_v4();
+    let id_deleted = uuid::Uuid::new_v4();
+
+    // Visible historical testimonial
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, author_role, text, sort_order, is_visible)
+         VALUES ($1, 'Historical Maestro', 'Conductor', 'Magnificent historical performance', 10, TRUE)",
+    )
+    .bind(id_vis)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Hidden historical testimonial (is_visible = false)
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, author_role, text, sort_order, is_visible)
+         VALUES ($1, 'Historical Hidden', 'Auditor', 'Confidential draft review', 20, FALSE)",
+    )
+    .bind(id_hidden)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Soft-deleted historical testimonial (deleted_at IS NOT NULL)
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, author_role, text, sort_order, is_visible, deleted_at)
+         VALUES ($1, 'Historical Deleted', 'Former Critic', 'Outdated review', 30, TRUE, CURRENT_TIMESTAMP)",
+    )
+    .bind(id_deleted)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 3. Execute original Migration 0015 (the actual migration file)
+    let migration_0015_sql =
+        include_str!("../../migrations/0015_testimonial_moderation_and_section_order.sql");
+    sqlx::raw_sql(migration_0015_sql)
+        .execute(&harness.pool)
+        .await
+        .expect("Original Migration 0015 must apply cleanly to pre-V2 database state");
+
+    // Verify the broken state produced by original 0015:
+    // Historical rows received DEFAULT 'pending' and submission_source 'admin'
+    let (broken_status, broken_source): (String, String) = sqlx::query_as(
+        "SELECT moderation_status, submission_source FROM testimonials WHERE id = $1",
+    )
+    .bind(id_vis)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        broken_status, "pending",
+        "Original 0015 bug: existing rows initially received DEFAULT 'pending'"
+    );
+    assert_eq!(broken_source, "admin");
+
+    // Seed the additional required rows representing post-0015 state before 0016 runs:
+    // a. Real public pending submission: pending / public
+    let id_public_pending = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible, moderation_status, submission_source)
+         VALUES ($1, 'Public Submitter', 'Pending review from visitor', 0, FALSE, 'pending', 'public')",
+    )
+    .bind(id_public_pending)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // b. Already approved admin testimonial: approved / admin
+    let id_already_approved = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible, moderation_status, submission_source)
+         VALUES ($1, 'Admin Approved', 'Legitimate approved review', 40, TRUE, 'approved', 'admin')",
+    )
+    .bind(id_already_approved)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // c. Rejected public testimonial: rejected / public
+    let id_rejected_public = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO testimonials (id, author_name, text, sort_order, is_visible, moderation_status, submission_source)
+         VALUES ($1, 'Spam Submitter', 'Rejected review', 0, FALSE, 'rejected', 'public')",
+    )
+    .bind(id_rejected_public)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 4. Execute Migration 0016 repair migration
+    let migration_0016_sql =
+        include_str!("../../migrations/0016_fix_testimonial_moderation_backfill.sql");
+    sqlx::raw_sql(migration_0016_sql)
+        .execute(&harness.pool)
+        .await
+        .expect("Migration 0016 must apply cleanly");
+
+    // 5. Assert repaired and untouched rows:
+    // a. Historical visible row repaired to approved / admin with all metadata intact
+    let (status_vis, source_vis, author_vis, text_vis, order_vis, vis_vis, del_vis): (
+        String,
+        String,
+        String,
+        String,
+        i32,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT moderation_status, submission_source, author_name, text, sort_order, is_visible, deleted_at FROM testimonials WHERE id = $1",
+    )
+    .bind(id_vis)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        status_vis, "approved",
+        "Historical visible row MUST be repaired to approved"
+    );
+    assert_eq!(
+        source_vis, "admin",
+        "Historical visible row MUST have submission_source = admin"
+    );
+    assert_eq!(author_vis, "Historical Maestro");
+    assert_eq!(text_vis, "Magnificent historical performance");
+    assert_eq!(order_vis, 10);
+    assert!(
+        vis_vis,
+        "Historical visible row must preserve is_visible = true"
+    );
+    assert!(del_vis.is_none());
+
+    // b. Historical hidden row repaired to approved / admin with is_visible = false preserved
+    let (status_hid, source_hid, vis_hid): (String, String, bool) = sqlx::query_as(
+        "SELECT moderation_status, submission_source, is_visible FROM testimonials WHERE id = $1",
+    )
+    .bind(id_hidden)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        status_hid, "approved",
+        "Historical hidden row MUST be repaired to approved"
+    );
+    assert_eq!(source_hid, "admin");
+    assert!(
+        !vis_hid,
+        "Historical hidden row MUST preserve is_visible = false"
+    );
+
+    // c. Historical deleted row repaired to approved / admin with deleted_at preserved
+    let (status_del, source_del, del_del): (String, String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT moderation_status, submission_source, deleted_at FROM testimonials WHERE id = $1",
+        )
+        .bind(id_deleted)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(status_del, "approved");
+    assert_eq!(source_del, "admin");
+    assert!(
+        del_del.is_some(),
+        "Historical deleted row must NOT be resurrected"
+    );
+
+    // d. CRITICAL: Real public pending submission MUST remain pending / public!
+    let (status_pub, source_pub, vis_pub): (String, String, bool) = sqlx::query_as(
+        "SELECT moderation_status, submission_source, is_visible FROM testimonials WHERE id = $1",
+    )
+    .bind(id_public_pending)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        status_pub, "pending",
+        "Real public pending submission MUST remain pending (never auto-approved)"
+    );
+    assert_eq!(source_pub, "public");
+    assert!(!vis_pub);
+
+    // e. Already approved row remains approved / admin
+    let (status_app, source_app): (String, String) = sqlx::query_as(
+        "SELECT moderation_status, submission_source FROM testimonials WHERE id = $1",
+    )
+    .bind(id_already_approved)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(status_app, "approved");
+    assert_eq!(source_app, "admin");
+
+    // f. Rejected public row remains rejected / public
+    let (status_rej, source_rej): (String, String) = sqlx::query_as(
+        "SELECT moderation_status, submission_source FROM testimonials WHERE id = $1",
+    )
+    .bind(id_rejected_public)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(status_rej, "rejected");
+    assert_eq!(source_rej, "public");
+
+    // 6. Public page verification: historical visible + already approved testimonials MUST appear
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res.status(), Status::Ok);
+    let pub_page: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+
+    let public_testimonial_ids: Vec<uuid::Uuid> =
+        pub_page.data.testimonials.iter().map(|t| t.id).collect();
+
+    assert!(
+        public_testimonial_ids.contains(&id_vis),
+        "Historical visible testimonial MUST remain exposed on public page after repair"
+    );
+    assert!(
+        public_testimonial_ids.contains(&id_already_approved),
+        "Already approved testimonial MUST appear on public page"
+    );
+    assert!(
+        !public_testimonial_ids.contains(&id_hidden),
+        "Historical hidden testimonial MUST remain hidden from public page"
+    );
+    assert!(
+        !public_testimonial_ids.contains(&id_deleted),
+        "Historical deleted testimonial MUST remain excluded from public page"
+    );
+    assert!(
+        !public_testimonial_ids.contains(&id_public_pending),
+        "Real public pending testimonial MUST NOT appear on public page"
+    );
+    assert!(
+        !public_testimonial_ids.contains(&id_rejected_public),
+        "Rejected public testimonial MUST NOT appear on public page"
+    );
+
+    // 7. Post-repair: new public submission must still default to pending / public / hidden
+    let pub_submit_res = harness
+        .client
+        .post("/api/v1/public/testimonials")
+        .json(&json!({
+            "author_name": "New Public Submitter Post-0016",
+            "text": "Post-migration review"
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(pub_submit_res.status(), Status::Created);
+    let pub_submit: SingleResponse<
+        spa_sax_backend::application::dto::SubmitPublicTestimonialResponse,
+    > = pub_submit_res.into_json().await.unwrap();
+
+    let (new_status, new_source, new_vis): (String, String, bool) = sqlx::query_as(
+        "SELECT moderation_status, submission_source, is_visible FROM testimonials WHERE id = $1",
+    )
+    .bind(pub_submit.data.id)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(new_status, "pending");
+    assert_eq!(new_source, "public");
+    assert!(!new_vis);
+
+    // 8. Post-repair: new admin create must still be approved / admin
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+    let admin_create_res = harness
+        .client
+        .post("/api/v1/admin/testimonials")
+        .header(auth_header)
+        .json(&json!({
+            "author_name": "New Admin Author Post-0016",
+            "text": "Post-migration admin review",
+            "is_visible": true
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(admin_create_res.status(), Status::Created);
+    let admin_create: SingleResponse<spa_sax_backend::application::dto::AdminTestimonialDto> =
+        admin_create_res.into_json().await.unwrap();
+
+    assert_eq!(
+        admin_create.data.moderation_status,
+        spa_sax_backend::domain::testimonials::TestimonialModerationStatus::Approved
+    );
+    assert_eq!(
+        admin_create.data.submission_source,
+        spa_sax_backend::domain::testimonials::TestimonialSubmissionSource::Admin
+    );
+    assert!(admin_create.data.is_visible);
+
+    common::cleanup_all_testimonials(&harness.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_sqlx_migration_chain_checksum_and_immutability() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // Run sqlx::migrate! on the pool which already has migrations recorded.
+    // This asserts that 0015's checksum matches what was recorded and 0016 is validly part of the chain.
+    let migrate_res = sqlx::migrate!("./migrations").run(&harness.pool).await;
+    assert!(
+        migrate_res.is_ok(),
+        "SQLx migration chain must execute cleanly without checksum mismatch: {:?}",
+        migrate_res.err()
+    );
+
+    // Verify both 0015 and 0016 are recorded as successfully applied in _sqlx_migrations
+    let applied_migrations: Vec<(i64, String, bool)> = sqlx::query_as(
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16) ORDER BY version ASC",
+    )
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(applied_migrations.len(), 2);
+    assert_eq!(applied_migrations[0].0, 15);
+    assert_eq!(
+        applied_migrations[0].1,
+        "testimonial moderation and section order"
+    );
+    assert!(applied_migrations[0].2);
+
+    assert_eq!(applied_migrations[1].0, 16);
+    assert_eq!(
+        applied_migrations[1].1,
+        "fix testimonial moderation backfill"
+    );
+    assert!(applied_migrations[1].2);
 }

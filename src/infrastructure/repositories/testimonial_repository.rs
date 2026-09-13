@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::application::dto::ReorderTestimonialItem;
+use crate::domain::testimonials::{TestimonialModerationStatus, TestimonialSubmissionSource};
 use crate::shared::errors::{ApiErrorDetails, AppError, AppResult};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -15,6 +16,8 @@ pub struct TestimonialRowWithMedia {
     pub avatar_media_id: Option<Uuid>,
     pub sort_order: i32,
     pub is_visible: bool,
+    pub moderation_status: TestimonialModerationStatus,
+    pub submission_source: TestimonialSubmissionSource,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -47,6 +50,8 @@ impl<'a> TestimonialRepository<'a> {
                 t.avatar_media_id,
                 t.sort_order,
                 t.is_visible,
+                t.moderation_status,
+                t.submission_source,
                 t.created_at,
                 t.updated_at,
                 t.deleted_at,
@@ -75,6 +80,8 @@ impl<'a> TestimonialRepository<'a> {
                 t.avatar_media_id,
                 t.sort_order,
                 t.is_visible,
+                t.moderation_status,
+                t.submission_source,
                 t.created_at,
                 t.updated_at,
                 t.deleted_at,
@@ -83,7 +90,7 @@ impl<'a> TestimonialRepository<'a> {
                 m.alt_text AS media_alt_text
             FROM testimonials t
             LEFT JOIN media_assets m ON t.avatar_media_id = m.id AND m.deleted_at IS NULL AND m.status = 'active'
-            WHERE t.deleted_at IS NULL AND t.is_visible = TRUE
+            WHERE t.deleted_at IS NULL AND t.is_visible = TRUE AND t.moderation_status = 'approved'
             ORDER BY t.sort_order ASC, t.id ASC
             "#,
         )
@@ -103,6 +110,8 @@ impl<'a> TestimonialRepository<'a> {
                 t.avatar_media_id,
                 t.sort_order,
                 t.is_visible,
+                t.moderation_status,
+                t.submission_source,
                 t.created_at,
                 t.updated_at,
                 t.deleted_at,
@@ -142,9 +151,9 @@ impl<'a> TestimonialRepository<'a> {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        // 1. Calculate next sort order inside transaction
+        // 1. Calculate next sort order among approved testimonials inside transaction
         let max_order: (i32,) = sqlx::query_as(
-            "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM testimonials WHERE deleted_at IS NULL",
+            "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM testimonials WHERE deleted_at IS NULL AND moderation_status = 'approved'",
         )
         .fetch_one(&mut *tx)
         .await
@@ -153,11 +162,11 @@ impl<'a> TestimonialRepository<'a> {
         let sort_order = max_order.0;
         let id = Uuid::new_v4();
 
-        // 2. Insert row
+        // 2. Insert row with approved status and admin source
         sqlx::query(
             r#"
-            INSERT INTO testimonials (id, author_name, author_role, text, avatar_media_id, sort_order, is_visible)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO testimonials (id, author_name, author_role, text, avatar_media_id, sort_order, is_visible, moderation_status, submission_source)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved', 'admin')
             "#,
         )
         .bind(id)
@@ -182,6 +191,8 @@ impl<'a> TestimonialRepository<'a> {
                 t.avatar_media_id,
                 t.sort_order,
                 t.is_visible,
+                t.moderation_status,
+                t.submission_source,
                 t.created_at,
                 t.updated_at,
                 t.deleted_at,
@@ -203,6 +214,178 @@ impl<'a> TestimonialRepository<'a> {
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         Ok(row)
+    }
+
+    pub async fn create_public(
+        &self,
+        author_name: &str,
+        author_role: Option<&str>,
+        text: &str,
+    ) -> AppResult<Uuid> {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO testimonials (id, author_name, author_role, text, avatar_media_id, sort_order, is_visible, moderation_status, submission_source)
+            VALUES ($1, $2, $3, $4, NULL, 0, FALSE, 'pending', 'public')
+            "#,
+        )
+        .bind(id)
+        .bind(author_name)
+        .bind(author_role)
+        .bind(text)
+        .execute(self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok(id)
+    }
+
+    pub async fn approve(&self, id: Uuid) -> AppResult<Option<TestimonialRowWithMedia>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Shared advisory lock ensures approve and admin create cannot race on sort_order allocation
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(TESTIMONIAL_CREATE_ORDER_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let existing: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, moderation_status FROM testimonials WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let (target_id, current_status) = match existing {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+        if current_status != "approved" {
+            // Calculate next canonical order among approved testimonials
+            let max_order: (i32,) = sqlx::query_as(
+                "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM testimonials WHERE deleted_at IS NULL AND moderation_status = 'approved'",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+            let next_order = max_order.0;
+
+            sqlx::query(
+                "UPDATE testimonials SET moderation_status = 'approved', is_visible = TRUE, sort_order = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+            )
+            .bind(next_order)
+            .bind(target_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        let row = sqlx::query_as::<_, TestimonialRowWithMedia>(
+            r#"
+            SELECT
+                t.id,
+                t.author_name,
+                t.author_role,
+                t.text,
+                t.avatar_media_id,
+                t.sort_order,
+                t.is_visible,
+                t.moderation_status,
+                t.submission_source,
+                t.created_at,
+                t.updated_at,
+                t.deleted_at,
+                m.id AS media_id,
+                m.storage_key AS media_storage_key,
+                m.alt_text AS media_alt_text
+            FROM testimonials t
+            LEFT JOIN media_assets m ON t.avatar_media_id = m.id AND m.deleted_at IS NULL AND m.status = 'active'
+            WHERE t.id = $1
+            "#,
+        )
+        .bind(target_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok(Some(row))
+    }
+
+    pub async fn reject(&self, id: Uuid) -> AppResult<Option<TestimonialRowWithMedia>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let existing: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, moderation_status FROM testimonials WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let (target_id, current_status) = match existing {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+        if current_status != "rejected" {
+            sqlx::query(
+                "UPDATE testimonials SET moderation_status = 'rejected', is_visible = FALSE, sort_order = 0, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            )
+            .bind(target_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        let row = sqlx::query_as::<_, TestimonialRowWithMedia>(
+            r#"
+            SELECT
+                t.id,
+                t.author_name,
+                t.author_role,
+                t.text,
+                t.avatar_media_id,
+                t.sort_order,
+                t.is_visible,
+                t.moderation_status,
+                t.submission_source,
+                t.created_at,
+                t.updated_at,
+                t.deleted_at,
+                m.id AS media_id,
+                m.storage_key AS media_storage_key,
+                m.alt_text AS media_alt_text
+            FROM testimonials t
+            LEFT JOIN media_assets m ON t.avatar_media_id = m.id AND m.deleted_at IS NULL AND m.status = 'active'
+            WHERE t.id = $1
+            "#,
+        )
+        .bind(target_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok(Some(row))
     }
 
     pub async fn update(
@@ -295,6 +478,8 @@ impl<'a> TestimonialRepository<'a> {
                 t.avatar_media_id,
                 t.sort_order,
                 t.is_visible,
+                t.moderation_status,
+                t.submission_source,
                 t.created_at,
                 t.updated_at,
                 t.deleted_at,
@@ -337,9 +522,9 @@ impl<'a> TestimonialRepository<'a> {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        // 1. Fetch active IDs from DB
+        // 1. Fetch active approved IDs from DB
         let active_rows: Vec<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM testimonials WHERE deleted_at IS NULL ORDER BY sort_order ASC, id ASC",
+            "SELECT id FROM testimonials WHERE deleted_at IS NULL AND moderation_status = 'approved' ORDER BY sort_order ASC, id ASC",
         )
         .fetch_all(&mut *tx)
         .await
@@ -353,7 +538,7 @@ impl<'a> TestimonialRepository<'a> {
             return Err(AppError::ValidationError(vec![ApiErrorDetails {
                 field: "items".to_string(),
                 message: format!(
-                    "Reorder items count ({}) does not match active testimonials count ({})",
+                    "Reorder items count ({}) does not match active approved testimonials count ({})",
                     items.len(),
                     db_ids_set.len()
                 ),
@@ -374,7 +559,7 @@ impl<'a> TestimonialRepository<'a> {
                 return Err(AppError::ValidationError(vec![ApiErrorDetails {
                     field: "items".to_string(),
                     message: format!(
-                        "Referenced testimonial ID {} is invalid or deleted",
+                        "Referenced testimonial ID {} is invalid, not approved, or deleted",
                         item.id
                     ),
                 }]));

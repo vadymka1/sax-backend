@@ -786,6 +786,27 @@ mod tests {
                 .contains_key("/api/v1/admin/testimonials/reorder"),
             "Missing path /api/v1/admin/testimonials/reorder"
         );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/v1/admin/testimonials/{id}/approve"),
+            "Missing path /api/v1/admin/testimonials/{{id}}/approve"
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/v1/admin/testimonials/{id}/reject"),
+            "Missing path /api/v1/admin/testimonials/{{id}}/reject"
+        );
+        assert!(
+            openapi
+                .paths
+                .paths
+                .contains_key("/api/v1/public/testimonials"),
+            "Missing path /api/v1/public/testimonials"
+        );
 
         // 2. Verify component schemas exist
         let components = openapi.components.expect("Components must exist");
@@ -798,6 +819,10 @@ mod tests {
             "UpdateTestimonialRequest",
             "ReorderTestimonialItem",
             "ReorderTestimonialsRequest",
+            "SubmitPublicTestimonialRequest",
+            "SubmitPublicTestimonialResponse",
+            "TestimonialModerationStatus",
+            "TestimonialSubmissionSource",
             "PublicTestimonialDto",
             "PublicTestimonialAvatarDto",
             "PublicPageResponse",
@@ -811,6 +836,12 @@ mod tests {
             );
         }
 
+        // Verify AdminTestimonialDto schema has moderation_status and submission_source
+        let admin_dto_schema = schemas.get("AdminTestimonialDto").unwrap();
+        let admin_dto_json = serde_json::to_string(admin_dto_schema).unwrap();
+        assert!(admin_dto_json.contains("moderation_status"));
+        assert!(admin_dto_json.contains("submission_source"));
+
         // 3. Verify PublicPageResponse has testimonials property
         let public_page_schema = schemas
             .get("PublicPageResponse")
@@ -819,6 +850,59 @@ mod tests {
         assert!(
             schema_json.contains("testimonials"),
             "PublicPageResponse must contain testimonials property"
+        );
+    }
+
+    #[test]
+    fn test_testimonial_moderation_and_source_enums_serialization() {
+        use spa_sax_backend::domain::testimonials::{
+            TestimonialModerationStatus, TestimonialSubmissionSource,
+        };
+
+        // 1. Moderation Status
+        assert_eq!(
+            serde_json::to_string(&TestimonialModerationStatus::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TestimonialModerationStatus::Approved).unwrap(),
+            "\"approved\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TestimonialModerationStatus::Rejected).unwrap(),
+            "\"rejected\""
+        );
+
+        assert_eq!(
+            serde_json::from_str::<TestimonialModerationStatus>("\"pending\"").unwrap(),
+            TestimonialModerationStatus::Pending
+        );
+        assert_eq!(
+            serde_json::from_str::<TestimonialModerationStatus>("\"approved\"").unwrap(),
+            TestimonialModerationStatus::Approved
+        );
+        assert_eq!(
+            serde_json::from_str::<TestimonialModerationStatus>("\"rejected\"").unwrap(),
+            TestimonialModerationStatus::Rejected
+        );
+
+        // 2. Submission Source
+        assert_eq!(
+            serde_json::to_string(&TestimonialSubmissionSource::Admin).unwrap(),
+            "\"admin\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TestimonialSubmissionSource::Public).unwrap(),
+            "\"public\""
+        );
+
+        assert_eq!(
+            serde_json::from_str::<TestimonialSubmissionSource>("\"admin\"").unwrap(),
+            TestimonialSubmissionSource::Admin
+        );
+        assert_eq!(
+            serde_json::from_str::<TestimonialSubmissionSource>("\"public\"").unwrap(),
+            TestimonialSubmissionSource::Public
         );
     }
 

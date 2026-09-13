@@ -5,8 +5,8 @@ use argon2::PasswordHasher;
 use uuid::Uuid;
 
 use spa_sax_backend::application::dto::{
-    AdminContentBlockDto, AdminMediaDto, AdminSpaSectionDto, PublicMediaDto, PublicPageResponse,
-    UserDto,
+    AdminContactMessageDto, AdminContentBlockDto, AdminMediaDto, AdminSpaSectionDto,
+    PublicMediaDto, PublicPageResponse, UserDto,
 };
 use spa_sax_backend::domain::users::Role;
 use spa_sax_backend::infrastructure::auth::PasswordService;
@@ -5254,10 +5254,11 @@ async fn test_contact_smtp_failure_preserves_db_submission() {
     let _lock = DB_LOCK.lock().await;
     let harness = TestHarness::new().await;
 
+    let secret_user = "configured_mailtrap_user_abc";
     let secret_pass = "super_secret_password_xyz999";
     let failure_msg = format!(
-        "SMTP connection refused: auth failed for secret {}",
-        secret_pass
+        "SMTP connection refused: auth failed for user {} with secret {}",
+        secret_user, secret_pass
     );
     let mailer = Arc::new(FakeContactMailer::new(false, &failure_msg));
 
@@ -5265,7 +5266,7 @@ async fn test_contact_smtp_failure_preserves_db_submission() {
         enabled: true,
         host: "smtp.fake.test".to_string(),
         port: 587,
-        username: Some("user".to_string()),
+        username: Some(secret_user.to_string()),
         password: Some(secret_pass.to_string()),
         from_email: "noreply@example.com".to_string(),
         from_name: "Ensti Sax".to_string(),
@@ -5315,11 +5316,15 @@ async fn test_contact_smtp_failure_preserves_db_submission() {
     let stored_err = row.2.unwrap();
     assert!(
         !stored_err.contains(secret_pass),
-        "Stored email_error MUST NOT contain raw SMTP credentials"
+        "Stored email_error MUST NOT contain raw SMTP password"
+    );
+    assert!(
+        !stored_err.contains(secret_user),
+        "Stored email_error MUST NOT contain raw SMTP username"
     );
     assert!(
         stored_err.contains("[REDACTED]"),
-        "Stored email_error MUST redact sensitive password occurrences"
+        "Stored email_error MUST redact sensitive credential occurrences"
     );
     assert!(
         stored_err.len() <= 500,
@@ -5377,6 +5382,584 @@ async fn test_contact_smtp_disabled_mode_zero_calls() {
     assert_eq!(row.0, "disabled", "email_status MUST be 'disabled'");
     assert!(row.1.is_none());
     assert!(row.2.is_none());
+}
+
+// =========================================================================
+// PART 18.5: ADMIN CONTACT MESSAGES INBOX & READ/UNREAD STATE TESTS
+// =========================================================================
+
+#[tokio::test]
+async fn test_admin_contact_messages_list_ordering_and_filtering() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // Clean up contact messages table
+    sqlx::query("DELETE FROM contact_messages")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    let id_c = Uuid::new_v4();
+
+    // Insert message A: 10 minutes ago, unread
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Alice Smith', 'alice@example.com', 'Inquiry A', 'Message A', 'sent', FALSE, NULL, NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes')
+        "#
+    )
+    .bind(id_a)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Insert message B: 5 minutes ago, read
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Bob Jones', 'bob@example.com', 'Inquiry B', 'Message B', 'sent', TRUE, NOW() - INTERVAL '4 minutes', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes')
+        "#
+    )
+    .bind(id_b)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Insert message C: 1 minute ago, unread
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Charlie Brown', 'charlie@example.com', 'Inquiry C', 'Message C', 'disabled', FALSE, NULL, NOW() - INTERVAL '1 minute', NOW() - INTERVAL '1 minute')
+        "#
+    )
+    .bind(id_c)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. GET /api/v1/admin/contact-messages (default / all) -> Ordered newest first: C, B, A
+    let res = harness
+        .client
+        .get("/api/v1/admin/contact-messages")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+    let body = res
+        .into_json::<SingleResponse<Vec<AdminContactMessageDto>>>()
+        .await
+        .unwrap();
+    assert_eq!(body.data.len(), 3);
+    assert_eq!(body.data[0].id, id_c);
+    assert_eq!(body.data[1].id, id_b);
+    assert_eq!(body.data[2].id, id_a);
+    assert_eq!(body.data[0].email_status, "disabled");
+    assert_eq!(body.data[1].email_status, "sent");
+    assert!(body.data[1].is_read);
+    assert!(body.data[1].read_at.is_some());
+    assert!(!body.data[0].is_read);
+    assert!(body.data[0].read_at.is_none());
+
+    // 2. GET ?status=unread -> C, A
+    let res_unread = harness
+        .client
+        .get("/api/v1/admin/contact-messages?status=unread")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res_unread.status(), Status::Ok);
+    let body_unread = res_unread
+        .into_json::<SingleResponse<Vec<AdminContactMessageDto>>>()
+        .await
+        .unwrap();
+    assert_eq!(body_unread.data.len(), 2);
+    assert_eq!(body_unread.data[0].id, id_c);
+    assert_eq!(body_unread.data[1].id, id_a);
+
+    // 3. GET ?status=read -> B
+    let res_read = harness
+        .client
+        .get("/api/v1/admin/contact-messages?status=read")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res_read.status(), Status::Ok);
+    let body_read = res_read
+        .into_json::<SingleResponse<Vec<AdminContactMessageDto>>>()
+        .await
+        .unwrap();
+    assert_eq!(body_read.data.len(), 1);
+    assert_eq!(body_read.data[0].id, id_b);
+
+    // 4. GET ?status=all -> C, B, A
+    let res_all = harness
+        .client
+        .get("/api/v1/admin/contact-messages?status=all")
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res_all.status(), Status::Ok);
+    let body_all = res_all
+        .into_json::<SingleResponse<Vec<AdminContactMessageDto>>>()
+        .await
+        .unwrap();
+    assert_eq!(body_all.data.len(), 3);
+}
+
+#[tokio::test]
+async fn test_admin_contact_messages_get_by_id_and_not_found() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Diana Prince', 'diana@example.com', 'Wonder Inquiry', 'Hello world', 'sent', FALSE, NULL, NOW(), NOW())
+        "#
+    )
+    .bind(id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. GET existing ID -> 200
+    let res = harness
+        .client
+        .get(format!("/api/v1/admin/contact-messages/{}", id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+    let body = res
+        .into_json::<SingleResponse<AdminContactMessageDto>>()
+        .await
+        .unwrap();
+    assert_eq!(body.data.id, id);
+    assert_eq!(body.data.name, "Diana Prince");
+    assert_eq!(body.data.email, "diana@example.com");
+    assert_eq!(body.data.subject.as_deref(), Some("Wonder Inquiry"));
+    assert_eq!(body.data.message, "Hello world");
+    assert_eq!(body.data.email_status, "sent");
+    assert!(!body.data.is_read);
+    assert!(body.data.read_at.is_none());
+
+    // 2. Re-verify database state to ensure GET did NOT auto-mark as read (Requirement 20)
+    let db_msg = sqlx::query_as::<_, (bool, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT is_read, read_at FROM contact_messages WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert!(
+        !db_msg.0,
+        "GET /admin/contact-messages/{id} MUST NOT auto-mark as read"
+    );
+    assert!(db_msg.1.is_none());
+
+    // 3. Unknown UUID -> 404
+    let unknown_id = Uuid::new_v4();
+    let res_404 = harness
+        .client
+        .get(format!("/api/v1/admin/contact-messages/{}", unknown_id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_404.status(), Status::NotFound);
+}
+
+#[tokio::test]
+async fn test_admin_contact_messages_mark_read_and_idempotency() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Edward Norton', 'edward@example.com', 'Acting', 'Message', 'sent', FALSE, NULL, NOW(), NOW())
+        "#
+    )
+    .bind(id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Mark as read
+    let res1 = harness
+        .client
+        .post(format!("/api/v1/admin/contact-messages/{}/read", id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res1.status(), Status::Ok);
+    let body1 = res1
+        .into_json::<SingleResponse<AdminContactMessageDto>>()
+        .await
+        .unwrap();
+    assert!(body1.data.is_read);
+    assert!(body1.data.read_at.is_some());
+    let first_read_at = body1.data.read_at.unwrap();
+
+    // 2. Idempotent call - mark as read again
+    let res2 = harness
+        .client
+        .post(format!("/api/v1/admin/contact-messages/{}/read", id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res2.status(), Status::Ok);
+    let body2 = res2
+        .into_json::<SingleResponse<AdminContactMessageDto>>()
+        .await
+        .unwrap();
+    assert!(body2.data.is_read);
+    assert_eq!(
+        body2.data.read_at.unwrap(),
+        first_read_at,
+        "read_at timestamp must remain consistent on repeated calls"
+    );
+
+    // 3. Unknown ID -> 404
+    let unknown_id = Uuid::new_v4();
+    let res_404 = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/contact-messages/{}/read",
+            unknown_id
+        ))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_404.status(), Status::NotFound);
+}
+
+#[tokio::test]
+async fn test_admin_contact_messages_mark_unread_and_idempotency() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Fiona Apple', 'fiona@example.com', 'Concert', 'Music', 'sent', TRUE, NOW(), NOW(), NOW())
+        "#
+    )
+    .bind(id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let auth_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+
+    // 1. Mark as unread
+    let res1 = harness
+        .client
+        .post(format!("/api/v1/admin/contact-messages/{}/unread", id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res1.status(), Status::Ok);
+    let body1 = res1
+        .into_json::<SingleResponse<AdminContactMessageDto>>()
+        .await
+        .unwrap();
+    assert!(!body1.data.is_read);
+    assert!(body1.data.read_at.is_none());
+
+    // 2. Mark as unread again (idempotent)
+    let res2 = harness
+        .client
+        .post(format!("/api/v1/admin/contact-messages/{}/unread", id))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+
+    assert_eq!(res2.status(), Status::Ok);
+    let body2 = res2
+        .into_json::<SingleResponse<AdminContactMessageDto>>()
+        .await
+        .unwrap();
+    assert!(!body2.data.is_read);
+    assert!(body2.data.read_at.is_none());
+
+    // 3. Unknown ID -> 404
+    let unknown_id = Uuid::new_v4();
+    let res_404 = harness
+        .client
+        .post(format!(
+            "/api/v1/admin/contact-messages/{}/unread",
+            unknown_id
+        ))
+        .header(auth_header.clone())
+        .dispatch()
+        .await;
+    assert_eq!(res_404.status(), Status::NotFound);
+}
+
+#[tokio::test]
+async fn test_admin_contact_messages_authorization_matrix() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO contact_messages (id, name, email, subject, message, email_status, is_read, read_at, created_at, updated_at)
+        VALUES ($1, 'Grace Hopper', 'grace@example.com', 'Auth Test', 'Testing roles', 'sent', FALSE, NULL, NOW(), NOW())
+        "#
+    )
+    .bind(id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let pass_hash = PasswordService::hash_password("password123").unwrap();
+
+    // Create admin user
+    let admin_id = Uuid::new_v4();
+    let admin_email = format!("admin_{}@example.com", admin_id.simple());
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Admin User', 'admin', TRUE)"
+    )
+    .bind(admin_id)
+    .bind(&admin_email)
+    .bind(&pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let admin_token = spa_sax_backend::infrastructure::auth::TokenService::generate_access_token(
+        admin_id,
+        &admin_email,
+        Role::Admin,
+        "test_jwt_access_secret_key_min_32_bytes_123456",
+        900,
+    )
+    .unwrap();
+
+    // Create editor user
+    let editor_id = Uuid::new_v4();
+    let editor_email = format!("editor_{}@example.com", editor_id.simple());
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Editor User', 'editor', TRUE)"
+    )
+    .bind(editor_id)
+    .bind(&editor_email)
+    .bind(&pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let editor_token = spa_sax_backend::infrastructure::auth::TokenService::generate_access_token(
+        editor_id,
+        &editor_email,
+        Role::Editor,
+        "test_jwt_access_secret_key_min_32_bytes_123456",
+        900,
+    )
+    .unwrap();
+
+    let super_admin_header = Header::new(
+        "Authorization",
+        format!("Bearer {}", harness.super_admin_token),
+    );
+    let admin_header = Header::new("Authorization", format!("Bearer {}", admin_token));
+    let editor_header = Header::new("Authorization", format!("Bearer {}", editor_token));
+
+    // 1. Unauthenticated -> 401
+    assert_eq!(
+        harness
+            .client
+            .get("/api/v1/admin/contact-messages")
+            .dispatch()
+            .await
+            .status(),
+        Status::Unauthorized
+    );
+    assert_eq!(
+        harness
+            .client
+            .get(format!("/api/v1/admin/contact-messages/{}", id))
+            .dispatch()
+            .await
+            .status(),
+        Status::Unauthorized
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/read", id))
+            .dispatch()
+            .await
+            .status(),
+        Status::Unauthorized
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/unread", id))
+            .dispatch()
+            .await
+            .status(),
+        Status::Unauthorized
+    );
+
+    // 2. Editor role -> 403 Forbidden
+    assert_eq!(
+        harness
+            .client
+            .get("/api/v1/admin/contact-messages")
+            .header(editor_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Forbidden
+    );
+    assert_eq!(
+        harness
+            .client
+            .get(format!("/api/v1/admin/contact-messages/{}", id))
+            .header(editor_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Forbidden
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/read", id))
+            .header(editor_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Forbidden
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/unread", id))
+            .header(editor_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Forbidden
+    );
+
+    // 3. Admin role -> 200 OK
+    assert_eq!(
+        harness
+            .client
+            .get("/api/v1/admin/contact-messages")
+            .header(admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(
+        harness
+            .client
+            .get(format!("/api/v1/admin/contact-messages/{}", id))
+            .header(admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/read", id))
+            .header(admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/unread", id))
+            .header(admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+
+    // 4. SuperAdmin role -> 200 OK
+    assert_eq!(
+        harness
+            .client
+            .get("/api/v1/admin/contact-messages")
+            .header(super_admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(
+        harness
+            .client
+            .get(format!("/api/v1/admin/contact-messages/{}", id))
+            .header(super_admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/read", id))
+            .header(super_admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(
+        harness
+            .client
+            .post(format!("/api/v1/admin/contact-messages/{}/unread", id))
+            .header(super_admin_header.clone())
+            .dispatch()
+            .await
+            .status(),
+        Status::Ok
+    );
 }
 
 // =========================================================================
@@ -8126,15 +8709,15 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
         migrate_res.err()
     );
 
-    // Verify both 0015 and 0016 are recorded as successfully applied in _sqlx_migrations
+    // Verify 0015, 0016, and 0017 are recorded as successfully applied in _sqlx_migrations
     let applied_migrations: Vec<(i64, String, bool)> = sqlx::query_as(
-        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16) ORDER BY version ASC",
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17) ORDER BY version ASC",
     )
     .fetch_all(&harness.pool)
     .await
     .unwrap();
 
-    assert_eq!(applied_migrations.len(), 2);
+    assert_eq!(applied_migrations.len(), 3);
     assert_eq!(applied_migrations[0].0, 15);
     assert_eq!(
         applied_migrations[0].1,
@@ -8148,4 +8731,8 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
         "fix testimonial moderation backfill"
     );
     assert!(applied_migrations[1].2);
+
+    assert_eq!(applied_migrations[2].0, 17);
+    assert_eq!(applied_migrations[2].1, "contact messages read state");
+    assert!(applied_migrations[2].2);
 }

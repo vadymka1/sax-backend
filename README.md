@@ -9,7 +9,7 @@ Backend API built with **Rust stable 2021**, **Rocket 0.5.1**, **PostgreSQL 17**
 Layered clean architecture:
 `HTTP Route` ➔ `Request Guard / Validation` ➔ `Service` ➔ `Repository / DB` ➔ `DTO Response`
 
-- **Authentication & RBAC**: `super_admin` & `admin` roles, Argon2id password hashing, short-lived Access JWT & 256-bit Refresh Token rotation.
+- **Authentication & RBAC**: `super_admin` & `admin` roles, Argon2id password hashing, short-lived in-memory Access JWT & Secure HttpOnly Refresh Token cookie sessions.
 - **Content Blocks**: Home page content blocks (`text`, `text_image`, `text_youtube`, `text_video`), transactional reordering, and soft delete.
 - **Media Management**: Local file uploads (`image/jpeg`, `image/png`, `image/webp`, `video/mp4`, `video/webm`), streaming size validation, path sanitization (`Component::Normal`), and YouTube URL metadata parsing.
 - **Public API**: Single aggregated `GET /api/v1/public/page` query returning home page blocks and media.
@@ -67,9 +67,9 @@ cargo run --bin create_admin
 | Method | Endpoint | Description | Auth Required |
 |---|---|---|:---:|
 | `GET` | `/health` | Liveness & Readiness checks | No |
-| `POST` | `/api/v1/auth/login` | Super Admin / Admin login | No |
-| `POST` | `/api/v1/auth/refresh` | Refresh Access Token (256-bit rotation) | No |
-| `POST` | `/api/v1/auth/logout` | Revoke Refresh Token | No |
+| `POST` | `/api/v1/auth/login` | Super Admin / Admin login (sets HttpOnly refresh cookie) | No |
+| `POST` | `/api/v1/auth/refresh` | Refresh Access Token (reads HttpOnly cookie, 256-bit rotation) | No |
+| `POST` | `/api/v1/auth/logout` | Revoke Refresh Token & clear cookie | No |
 | `GET` | `/api/v1/auth/me` | Current user profile | Bearer JWT |
 | `GET` | `/api/v1/admin/users` | List admin users | Bearer JWT (super_admin) |
 | `POST` | `/api/v1/admin/users` | Create new admin user (`admin` or `super_admin` role) | Bearer JWT (super_admin) |

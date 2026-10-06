@@ -229,6 +229,10 @@ impl AppConfig {
             smtp,
         })
     }
+
+    pub fn is_production(&self) -> bool {
+        self.env == "production"
+    }
 }
 
 pub fn validate_test_database_environment(app_env: &str, database_url: &str) -> Result<(), String> {

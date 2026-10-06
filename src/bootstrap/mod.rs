@@ -92,8 +92,6 @@ fn swagger_ui_redirect() -> Redirect {
     components(
         schemas(
             dto::LoginRequest,
-            dto::RefreshTokenRequest,
-            dto::LogoutRequest,
             dto::AuthTokensDto,
             dto::RefreshTokenDataDto,
             dto::MessageDataDto,

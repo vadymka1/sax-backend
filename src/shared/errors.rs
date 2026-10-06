@@ -41,6 +41,7 @@ pub enum AppError {
     InvalidMediaType,
     FileTooLarge,
     InvalidYoutubeUrl,
+    BadRequest(String),
     DatabaseError(String),
     Internal(String),
     RateLimitExceeded,
@@ -65,6 +66,7 @@ impl AppError {
             AppError::InvalidMediaType => "INVALID_MEDIA_TYPE",
             AppError::FileTooLarge => "FILE_TOO_LARGE",
             AppError::InvalidYoutubeUrl => "INVALID_YOUTUBE_URL",
+            AppError::BadRequest(_) => "BAD_REQUEST",
             AppError::DatabaseError(_) => "DATABASE_ERROR",
             AppError::Internal(_) => "INTERNAL_SERVER_ERROR",
             AppError::RateLimitExceeded => "RATE_LIMIT_EXCEEDED",
@@ -84,9 +86,10 @@ impl AppError {
             }
             AppError::UserInactive => Status::Forbidden,
             AppError::ResourceConflict(_) | AppError::DuplicateEmail => Status::Conflict,
-            AppError::InvalidMediaType | AppError::FileTooLarge | AppError::InvalidYoutubeUrl => {
-                Status::BadRequest
-            }
+            AppError::BadRequest(_)
+            | AppError::InvalidMediaType
+            | AppError::FileTooLarge
+            | AppError::InvalidYoutubeUrl => Status::BadRequest,
             AppError::RateLimitExceeded => Status::TooManyRequests,
             AppError::DatabaseError(_) | AppError::Internal(_) => Status::InternalServerError,
         }
@@ -108,6 +111,7 @@ impl AppError {
             AppError::InvalidMediaType => "Unsupported media type".to_string(),
             AppError::FileTooLarge => "Uploaded file exceeds maximum size limit".to_string(),
             AppError::InvalidYoutubeUrl => "Invalid YouTube URL format".to_string(),
+            AppError::BadRequest(msg) => msg.clone(),
             AppError::DatabaseError(_) => "A database error occurred".to_string(),
             AppError::Internal(_) => "An internal server error occurred".to_string(),
             AppError::RateLimitExceeded => "Too many requests".to_string(),

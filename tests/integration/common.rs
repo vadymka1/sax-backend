@@ -270,6 +270,16 @@ pub async fn reset_home_sections_to_bootstrap(pool: &PgPool) {
     // Ensure old defaults are hidden
     sqlx::query("UPDATE spa_sections SET sort_order = 50, is_visible = FALSE, deleted_at = NULL WHERE id = '22222222-2222-2222-2222-222222222222'").execute(pool).await.ok();
     sqlx::query("UPDATE spa_sections SET sort_order = 60, is_visible = FALSE, deleted_at = NULL WHERE id = '33333333-3333-3333-3333-333333333333'").execute(pool).await.ok();
+
+    // Ensure English translations exist for all canonical spa_sections
+    sqlx::query(
+        "INSERT INTO spa_section_translations (spa_section_id, locale, name)
+         SELECT id, 'en', title FROM spa_sections
+         ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name",
+    )
+    .execute(pool)
+    .await
+    .ok();
 }
 
 pub async fn cleanup_test_user(pool: &PgPool, user_id: uuid::Uuid) -> Result<(), sqlx::Error> {

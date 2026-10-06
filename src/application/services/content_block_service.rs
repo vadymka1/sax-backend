@@ -4,13 +4,22 @@ use uuid::Uuid;
 
 use crate::api::guards::AuthenticatedUser;
 use crate::application::dto::{
-    AdminContentBlockDto, BlockAttachedMediaDto, CreateContentBlockRequest,
-    ReorderContentBlockItem, ReorderContentBlocksRequest, UpdateContentBlockRequest,
+    AdminContentBlockDto, BlockAttachedMediaDto, ContentBlockTranslationDto,
+    ContentBlockTranslationsDto, CreateContentBlockRequest, ReorderContentBlockItem,
+    ReorderContentBlocksRequest, UpdateContentBlockRequest,
 };
 use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 use crate::shared::errors::{ApiErrorDetails, AppError, AppResult};
 
 pub const DEFAULT_MEDIA_USAGE_TYPE: &str = "content";
+
+#[derive(sqlx::FromRow)]
+struct BlockTranslationRow {
+    content_block_id: Uuid,
+    locale: String,
+    title: Option<String>,
+    text: String,
+}
 
 #[allow(dead_code)]
 #[derive(sqlx::FromRow)]
@@ -355,7 +364,38 @@ impl<'a> ContentBlockService<'a> {
             return Err(AppError::Forbidden);
         }
 
-        self.validate_text_and_title(req.title.as_deref(), &req.text)?;
+        // Validate translation payload vs legacy text
+        let (en_title, en_text, de_title, de_text) = if let Some(ref trans) = req.translations {
+            let (en_t, en_tx) = match trans.en {
+                Some(ref en) => {
+                    self.validate_text_and_title(en.title.as_deref(), &en.text)?;
+                    (en.title.clone(), en.text.clone())
+                }
+                None => {
+                    return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                        field: "translations.en".to_string(),
+                        message: "English translation is required".to_string(),
+                    }]));
+                }
+            };
+
+            let (de_t, de_tx) = if let Some(ref de) = trans.de {
+                self.validate_text_and_title(de.title.as_deref(), &de.text)?;
+                (de.title.clone(), Some(de.text.clone()))
+            } else {
+                (None, None)
+            };
+
+            (en_t, en_tx, de_t, de_tx)
+        } else if !req.text.trim().is_empty() {
+            self.validate_text_and_title(req.title.as_deref(), &req.text)?;
+            (req.title.clone(), req.text.clone(), None, None)
+        } else {
+            return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                field: "text".to_string(),
+                message: "Text or translations is required".to_string(),
+            }]));
+        };
 
         let mut tx: Transaction<'_, Postgres> = self
             .pool
@@ -382,7 +422,7 @@ impl<'a> ContentBlockService<'a> {
         let page_id = Self::get_home_page_id_tx(&mut tx).await?;
         let block_id = Uuid::new_v4();
         let section_key = format!("block_{}", block_id.simple());
-        let content_json = serde_json::json!({ "text": req.text });
+        let content_json = serde_json::json!({ "text": en_text });
         let is_visible = req.is_visible.unwrap_or(true);
 
         let font_family = req.font_family.unwrap_or(FontFamily::Sans);
@@ -400,7 +440,7 @@ impl<'a> ContentBlockService<'a> {
         .bind(req.spa_section_id)
         .bind(section_key)
         .bind(req.block_type.as_str())
-        .bind(&req.title)
+        .bind(&en_title)
         .bind(&content_json)
         .bind(font_family.as_str())
         .bind(font_size.as_str())
@@ -410,6 +450,38 @@ impl<'a> ContentBlockService<'a> {
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Insert English translation
+        sqlx::query(
+            r#"
+            INSERT INTO content_block_translations (content_block_id, locale, title, text)
+            VALUES ($1, 'en', $2, $3)
+            ON CONFLICT (content_block_id, locale) DO UPDATE SET title = EXCLUDED.title, text = EXCLUDED.text, updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(block_id)
+        .bind(&en_title)
+        .bind(&en_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Insert German translation if provided
+        if let Some(ref de_tx) = de_text {
+            sqlx::query(
+                r#"
+                INSERT INTO content_block_translations (content_block_id, locale, title, text)
+                VALUES ($1, 'de', $2, $3)
+                ON CONFLICT (content_block_id, locale) DO UPDATE SET title = EXCLUDED.title, text = EXCLUDED.text, updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(block_id)
+            .bind(&de_title)
+            .bind(de_tx)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
 
         for (idx, m) in media_dtos.iter().enumerate() {
             let media_sort = (idx as i32 + 1) * 10;
@@ -441,14 +513,27 @@ impl<'a> ContentBlockService<'a> {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        let en_dto = ContentBlockTranslationDto {
+            title: en_title.clone(),
+            text: en_text.clone(),
+        };
+        let de_dto = de_text.map(|tx_val| ContentBlockTranslationDto {
+            title: de_title,
+            text: tx_val,
+        });
+
         Ok(AdminContentBlockDto {
             id: row.id,
             spa_section_id: row.spa_section_id,
             section_key: sec_key,
             section_title: sec_title,
             block_type: req.block_type,
-            title: row.title,
-            text: req.text,
+            title: en_title,
+            text: en_text,
+            translations: ContentBlockTranslationsDto {
+                en: en_dto,
+                de: de_dto,
+            },
             media: media_dtos,
             font_family,
             font_size,
@@ -586,10 +671,69 @@ impl<'a> ContentBlockService<'a> {
             .map_err(|e| AppError::DatabaseError(e.to_string()))?
         };
 
-        Ok(Self::map_rows_to_dtos(rows))
+        let block_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+        let trans_map = Self::fetch_translations_for_blocks(self.pool, &block_ids).await?;
+        Ok(Self::map_rows_to_dtos(rows, &trans_map))
     }
 
-    fn map_rows_to_dtos(rows: Vec<JoinedAdminBlockRow>) -> Vec<AdminContentBlockDto> {
+    async fn fetch_translations_for_blocks(
+        pool: &PgPool,
+        block_ids: &[Uuid],
+    ) -> AppResult<HashMap<Uuid, HashMap<String, (Option<String>, String)>>> {
+        if block_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let rows = sqlx::query_as::<_, BlockTranslationRow>(
+            r#"
+            SELECT content_block_id, locale, title, text
+            FROM content_block_translations
+            WHERE content_block_id = ANY($1)
+            "#,
+        )
+        .bind(block_ids)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let mut map: HashMap<Uuid, HashMap<String, (Option<String>, String)>> = HashMap::new();
+        for r in rows {
+            map.entry(r.content_block_id)
+                .or_default()
+                .insert(r.locale, (r.title, r.text));
+        }
+
+        Ok(map)
+    }
+
+    async fn fetch_translations_for_block_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        block_id: Uuid,
+    ) -> AppResult<HashMap<String, (Option<String>, String)>> {
+        let rows = sqlx::query_as::<_, BlockTranslationRow>(
+            r#"
+            SELECT content_block_id, locale, title, text
+            FROM content_block_translations
+            WHERE content_block_id = $1
+            "#,
+        )
+        .bind(block_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let mut map: HashMap<String, (Option<String>, String)> = HashMap::new();
+        for r in rows {
+            map.insert(r.locale, (r.title, r.text));
+        }
+
+        Ok(map)
+    }
+
+    fn map_rows_to_dtos(
+        rows: Vec<JoinedAdminBlockRow>,
+        trans_map: &HashMap<Uuid, HashMap<String, (Option<String>, String)>>,
+    ) -> Vec<AdminContentBlockDto> {
         let mut dtos: Vec<AdminContentBlockDto> = Vec::new();
         let mut block_index: HashMap<Uuid, usize> = HashMap::new();
 
@@ -601,7 +745,7 @@ impl<'a> ContentBlockService<'a> {
                         Some(bt) => bt,
                         None => continue,
                     };
-                    let text = row
+                    let legacy_text = row
                         .content
                         .get("text")
                         .and_then(|v| v.as_str())
@@ -611,6 +755,39 @@ impl<'a> ContentBlockService<'a> {
                         FontFamily::parse(&row.font_family).unwrap_or(FontFamily::Sans);
                     let font_size = FontSize::parse(&row.font_size).unwrap_or(FontSize::Md);
 
+                    let (en_dto, de_dto) = match trans_map.get(&row.id) {
+                        Some(locale_map) => {
+                            let en = match locale_map.get("en") {
+                                Some((t, tx)) => ContentBlockTranslationDto {
+                                    title: t.clone(),
+                                    text: tx.clone(),
+                                },
+                                None => ContentBlockTranslationDto {
+                                    title: row.title.clone(),
+                                    text: legacy_text.clone(),
+                                },
+                            };
+                            let de =
+                                locale_map
+                                    .get("de")
+                                    .map(|(t, tx)| ContentBlockTranslationDto {
+                                        title: t.clone(),
+                                        text: tx.clone(),
+                                    });
+                            (en, de)
+                        }
+                        None => (
+                            ContentBlockTranslationDto {
+                                title: row.title.clone(),
+                                text: legacy_text.clone(),
+                            },
+                            None,
+                        ),
+                    };
+
+                    let title = en_dto.title.clone();
+                    let text = en_dto.text.clone();
+
                     let idx = dtos.len();
                     block_index.insert(row.id, idx);
                     dtos.push(AdminContentBlockDto {
@@ -619,8 +796,12 @@ impl<'a> ContentBlockService<'a> {
                         section_key: row.section_key,
                         section_title: row.section_title,
                         block_type,
-                        title: row.title,
+                        title,
                         text,
+                        translations: ContentBlockTranslationsDto {
+                            en: en_dto,
+                            de: de_dto,
+                        },
                         media: Vec::new(),
                         font_family,
                         font_size,
@@ -711,7 +892,8 @@ impl<'a> ContentBlockService<'a> {
             return Err(AppError::NotFound("Content block not found".to_string()));
         }
 
-        let mut dtos = Self::map_rows_to_dtos(rows);
+        let trans_map = Self::fetch_translations_for_blocks(self.pool, &[id]).await?;
+        let mut dtos = Self::map_rows_to_dtos(rows, &trans_map);
         dtos.pop()
             .ok_or_else(|| AppError::NotFound("Content block not found".to_string()))
     }
@@ -747,6 +929,125 @@ impl<'a> ContentBlockService<'a> {
             .to_string();
 
         let current_media_ids: Vec<Uuid> = current_rows.iter().filter_map(|r| r.media_id).collect();
+
+        // Fetch current translations inside tx
+        let current_trans = Self::fetch_translations_for_block_tx(&mut tx, id).await?;
+        let current_en = current_trans
+            .get("en")
+            .cloned()
+            .unwrap_or_else(|| (first_row.title.clone(), current_text.clone()));
+        let current_de = current_trans.get("de").cloned();
+
+        let mut new_en_title = current_en.0.clone();
+        let mut new_en_text = current_en.1.clone();
+        let mut update_en = false;
+
+        let mut new_de_title = current_de.as_ref().and_then(|d| d.0.clone());
+        let mut new_de_text = current_de.as_ref().map(|d| d.1.clone());
+        let mut update_de = false;
+
+        if let Some(ref trans) = req.translations {
+            if let Some(ref en_req) = trans.en {
+                update_en = true;
+                if let Some(ref t) = en_req.title {
+                    let trimmed = t.trim();
+                    if trimmed.len() > 200 {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "translations.en.title".to_string(),
+                            message: "Title exceeds 200 characters".to_string(),
+                        }]));
+                    }
+                    new_en_title = Some(trimmed.to_string());
+                }
+                if let Some(ref tx_val) = en_req.text {
+                    let trimmed = tx_val.trim();
+                    if trimmed.is_empty() {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "translations.en.text".to_string(),
+                            message: "Text cannot be empty or whitespace".to_string(),
+                        }]));
+                    }
+                    if trimmed.len() > 10000 {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "translations.en.text".to_string(),
+                            message: "Text exceeds 10000 characters".to_string(),
+                        }]));
+                    }
+                    new_en_text = trimmed.to_string();
+                } else if !current_trans.contains_key("en") && new_en_text.trim().is_empty() {
+                    return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                        field: "translations.en.text".to_string(),
+                        message: "English text is required when creating a new English translation for this block".to_string(),
+                    }]));
+                }
+            }
+
+            if let Some(ref de_req) = trans.de {
+                update_de = true;
+                if let Some(ref t) = de_req.title {
+                    let trimmed = t.trim();
+                    if trimmed.len() > 200 {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "translations.de.title".to_string(),
+                            message: "Title exceeds 200 characters".to_string(),
+                        }]));
+                    }
+                    new_de_title = Some(trimmed.to_string());
+                }
+
+                if let Some(ref tx_val) = de_req.text {
+                    let trimmed = tx_val.trim();
+                    if trimmed.is_empty() {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "translations.de.text".to_string(),
+                            message: "German text cannot be empty or whitespace".to_string(),
+                        }]));
+                    }
+                    if trimmed.len() > 10000 {
+                        return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                            field: "translations.de.text".to_string(),
+                            message: "Text exceeds 10000 characters".to_string(),
+                        }]));
+                    }
+                    new_de_text = Some(trimmed.to_string());
+                } else if current_de.is_none() {
+                    return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                        field: "translations.de.text".to_string(),
+                        message: "German text is required when creating a new German translation for this block".to_string(),
+                    }]));
+                }
+            }
+        }
+
+        if let Some(ref t) = req.title {
+            let trimmed = t.trim();
+            if trimmed.len() > 200 {
+                return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                    field: "title".to_string(),
+                    message: "Title exceeds 200 characters".to_string(),
+                }]));
+            }
+            new_en_title = Some(trimmed.to_string());
+            update_en = true;
+        }
+
+        if let Some(ref tx_val) = req.text {
+            let trimmed = tx_val.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                    field: "text".to_string(),
+                    message: "Text cannot be empty or whitespace".to_string(),
+                }]));
+            }
+            if trimmed.len() > 10000 {
+                return Err(AppError::ValidationError(vec![ApiErrorDetails {
+                    field: "text".to_string(),
+                    message: "Text exceeds 10000 characters".to_string(),
+                }]));
+            }
+            new_en_text = trimmed.to_string();
+            update_en = true;
+        }
 
         // Section Move Logic
         let (target_spa_section_id, new_sec_key, new_sec_title, target_sort_order) =
@@ -797,11 +1098,6 @@ impl<'a> ContentBlockService<'a> {
             };
 
         let new_block_type = req.block_type.unwrap_or(current_block_type);
-        let new_title = match req.title {
-            Some(t) => Some(t),
-            None => first_row.title.clone(),
-        };
-        let new_text = req.text.unwrap_or(current_text);
         let new_is_visible = req.is_visible.unwrap_or(first_row.is_visible);
 
         let new_font_family = req
@@ -813,8 +1109,6 @@ impl<'a> ContentBlockService<'a> {
             .font_size
             .or_else(|| FontSize::parse(&first_row.font_size))
             .unwrap_or(FontSize::Md);
-
-        self.validate_text_and_title(new_title.as_deref(), &new_text)?;
 
         // Media resolution: check media_ids or legacy media_id
         let media_mutation_requested =
@@ -833,7 +1127,7 @@ impl<'a> ContentBlockService<'a> {
 
         let media_dtos =
             Self::validate_media_for_type_tx(&mut tx, new_block_type, &target_media_ids).await?;
-        let content_json = serde_json::json!({ "text": new_text });
+        let content_json = serde_json::json!({ "text": new_en_text });
 
         let updated_row = sqlx::query_as::<_, SectionRow>(
             r#"
@@ -845,7 +1139,7 @@ impl<'a> ContentBlockService<'a> {
         )
         .bind(target_spa_section_id)
         .bind(new_block_type.as_str())
-        .bind(&new_title)
+        .bind(&new_en_title)
         .bind(&content_json)
         .bind(new_font_family.as_str())
         .bind(new_font_size.as_str())
@@ -856,6 +1150,42 @@ impl<'a> ContentBlockService<'a> {
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // Upsert English translation if updated
+        if update_en {
+            sqlx::query(
+                r#"
+                INSERT INTO content_block_translations (content_block_id, locale, title, text)
+                VALUES ($1, 'en', $2, $3)
+                ON CONFLICT (content_block_id, locale) DO UPDATE SET title = EXCLUDED.title, text = EXCLUDED.text, updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(id)
+            .bind(&new_en_title)
+            .bind(&new_en_text)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        // Upsert German translation if updated
+        if update_de {
+            if let Some(ref de_tx) = new_de_text {
+                sqlx::query(
+                    r#"
+                    INSERT INTO content_block_translations (content_block_id, locale, title, text)
+                    VALUES ($1, 'de', $2, $3)
+                    ON CONFLICT (content_block_id, locale) DO UPDATE SET title = EXCLUDED.title, text = EXCLUDED.text, updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(id)
+                .bind(&new_de_title)
+                .bind(de_tx)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            }
+        }
 
         // Mutate section_media ONLY if media or block_type was explicitly updated
         if media_mutation_requested {
@@ -901,14 +1231,27 @@ impl<'a> ContentBlockService<'a> {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        let en_dto = ContentBlockTranslationDto {
+            title: new_en_title.clone(),
+            text: new_en_text.clone(),
+        };
+        let de_dto = new_de_text.map(|tx_val| ContentBlockTranslationDto {
+            title: new_de_title,
+            text: tx_val,
+        });
+
         Ok(AdminContentBlockDto {
             id: updated_row.id,
             spa_section_id: updated_row.spa_section_id,
             section_key: new_sec_key,
             section_title: new_sec_title,
             block_type: new_block_type,
-            title: updated_row.title,
-            text: new_text,
+            title: new_en_title,
+            text: new_en_text,
+            translations: ContentBlockTranslationsDto {
+                en: en_dto,
+                de: de_dto,
+            },
             media: media_dtos,
             font_family: new_font_family,
             font_size: new_font_size,

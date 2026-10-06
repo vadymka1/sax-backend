@@ -6,6 +6,26 @@ use crate::application::dto::{AdminSpaSectionDto, ReorderSpaSectionItem};
 use crate::domain::sections::SpaSection;
 use crate::shared::errors::{ApiErrorDetails, AppError, AppResult};
 
+#[derive(sqlx::FromRow)]
+struct RawAdminSpaSectionRow {
+    id: Uuid,
+    key: String,
+    title: String,
+    navigation_label: String,
+    sort_order: i32,
+    is_visible: bool,
+    content_block_count: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SpaSectionTranslationRow {
+    spa_section_id: Uuid,
+    locale: String,
+    name: String,
+}
+
 pub struct SpaSectionRepository<'a> {
     pool: &'a PgPool,
 }
@@ -76,7 +96,7 @@ impl<'a> SpaSectionRepository<'a> {
     }
 
     pub async fn list_admin_for_page(&self, page_id: Uuid) -> AppResult<Vec<AdminSpaSectionDto>> {
-        sqlx::query_as::<_, AdminSpaSectionDto>(
+        let rows = sqlx::query_as::<_, RawAdminSpaSectionRow>(
             r#"
             SELECT
                 s.id,
@@ -98,7 +118,65 @@ impl<'a> SpaSectionRepository<'a> {
         .bind(page_id)
         .fetch_all(self.pool)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let trans_rows = sqlx::query_as::<_, SpaSectionTranslationRow>(
+            r#"
+            SELECT spa_section_id, locale, name
+            FROM spa_section_translations
+            WHERE spa_section_id IN (SELECT id FROM spa_sections WHERE page_id = $1 AND deleted_at IS NULL)
+            "#,
+        )
+        .bind(page_id)
+        .fetch_all(self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let mut trans_map: std::collections::HashMap<
+            Uuid,
+            std::collections::HashMap<String, String>,
+        > = std::collections::HashMap::new();
+        for tr in trans_rows {
+            trans_map
+                .entry(tr.spa_section_id)
+                .or_default()
+                .insert(tr.locale, tr.name);
+        }
+
+        let dtos = rows
+            .into_iter()
+            .map(|row| {
+                let section_trans = trans_map.get(&row.id);
+                let en_name = section_trans
+                    .and_then(|m| m.get("en"))
+                    .cloned()
+                    .unwrap_or_else(|| row.title.clone());
+                let de_name = section_trans.and_then(|m| m.get("de")).cloned();
+
+                AdminSpaSectionDto {
+                    id: row.id,
+                    key: row.key,
+                    title: row.title,
+                    navigation_label: row.navigation_label,
+                    sort_order: row.sort_order,
+                    is_visible: row.is_visible,
+                    content_block_count: row.content_block_count,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                    translations: crate::application::dto::SpaSectionTranslationsDto {
+                        en: crate::application::dto::SpaSectionTranslationDto { name: en_name },
+                        de: de_name
+                            .map(|name| crate::application::dto::SpaSectionTranslationDto { name }),
+                    },
+                }
+            })
+            .collect();
+
+        Ok(dtos)
     }
 
     pub async fn find_admin_by_id(
@@ -106,7 +184,7 @@ impl<'a> SpaSectionRepository<'a> {
         page_id: Uuid,
         id: Uuid,
     ) -> AppResult<Option<AdminSpaSectionDto>> {
-        sqlx::query_as::<_, AdminSpaSectionDto>(
+        let row_opt = sqlx::query_as::<_, RawAdminSpaSectionRow>(
             r#"
             SELECT
                 s.id,
@@ -128,7 +206,52 @@ impl<'a> SpaSectionRepository<'a> {
         .bind(id)
         .fetch_optional(self.pool)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let row = match row_opt {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let trans_rows = sqlx::query_as::<_, SpaSectionTranslationRow>(
+            r#"
+            SELECT spa_section_id, locale, name
+            FROM spa_section_translations
+            WHERE spa_section_id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_all(self.pool)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let mut trans_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for tr in trans_rows {
+            trans_map.insert(tr.locale, tr.name);
+        }
+
+        let en_name = trans_map
+            .get("en")
+            .cloned()
+            .unwrap_or_else(|| row.title.clone());
+        let de_name = trans_map.get("de").cloned();
+
+        Ok(Some(AdminSpaSectionDto {
+            id: row.id,
+            key: row.key,
+            title: row.title,
+            navigation_label: row.navigation_label,
+            sort_order: row.sort_order,
+            is_visible: row.is_visible,
+            content_block_count: row.content_block_count,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            translations: crate::application::dto::SpaSectionTranslationsDto {
+                en: crate::application::dto::SpaSectionTranslationDto { name: en_name },
+                de: de_name.map(|name| crate::application::dto::SpaSectionTranslationDto { name }),
+            },
+        }))
     }
 
     pub async fn create_dynamic_for_page(
@@ -137,6 +260,7 @@ impl<'a> SpaSectionRepository<'a> {
         base_key: &str,
         title: &str,
         nav_label: &str,
+        de_name: Option<&str>,
     ) -> AppResult<SpaSection> {
         let mut tx = self
             .pool
@@ -213,6 +337,36 @@ impl<'a> SpaSectionRepository<'a> {
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
+        // 5. Insert English translation
+        sqlx::query(
+            r#"
+            INSERT INTO spa_section_translations (spa_section_id, locale, name)
+            VALUES ($1, 'en', $2)
+            ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(id)
+        .bind(title)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        // 6. Insert German translation if provided
+        if let Some(de) = de_name {
+            sqlx::query(
+                r#"
+                INSERT INTO spa_section_translations (spa_section_id, locale, name)
+                VALUES ($1, 'de', $2)
+                ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(id)
+            .bind(de)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
         tx.commit()
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
@@ -226,8 +380,19 @@ impl<'a> SpaSectionRepository<'a> {
         title: Option<&str>,
         nav_label: Option<&str>,
         is_visible: Option<bool>,
+        en_name: Option<&str>,
+        de_name: Option<&str>,
     ) -> AppResult<Option<SpaSection>> {
-        sqlx::query_as::<_, SpaSection>(
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let effective_title = en_name.or(title);
+        let effective_nav = nav_label.or(en_name);
+
+        let section = sqlx::query_as::<_, SpaSection>(
             r#"
             UPDATE spa_sections
             SET
@@ -240,12 +405,54 @@ impl<'a> SpaSectionRepository<'a> {
             "#
         )
         .bind(id)
-        .bind(title)
-        .bind(nav_label)
+        .bind(effective_title)
+        .bind(effective_nav)
         .bind(is_visible)
-        .fetch_optional(self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        if section.is_none() {
+            return Ok(None);
+        }
+
+        // Upsert EN translation if provided (or if legacy title updated)
+        if let Some(en) = effective_title {
+            sqlx::query(
+                r#"
+                INSERT INTO spa_section_translations (spa_section_id, locale, name)
+                VALUES ($1, 'en', $2)
+                ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(id)
+            .bind(en)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        // Upsert DE translation if provided
+        if let Some(de) = de_name {
+            sqlx::query(
+                r#"
+                INSERT INTO spa_section_translations (spa_section_id, locale, name)
+                VALUES ($1, 'de', $2)
+                ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(id)
+            .bind(de)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        Ok(section)
     }
 
     pub async fn soft_delete_empty_for_page(&self, page_id: Uuid, id: Uuid) -> AppResult<bool> {

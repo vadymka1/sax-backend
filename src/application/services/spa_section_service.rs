@@ -109,25 +109,65 @@ impl<'a> SpaSectionService<'a> {
 
         let mut errors = Vec::new();
 
-        let title_trimmed = req.title.trim();
-        if title_trimmed.is_empty() {
+        let (en_name, de_name) = if let Some(ref trans) = req.translations {
+            let en_trimmed = trans.en.name.trim();
+            if en_trimmed.is_empty() {
+                errors.push(ApiErrorDetails {
+                    field: "translations.en.name".to_string(),
+                    message: "English name is required and cannot be empty".to_string(),
+                });
+            } else if en_trimmed.len() > 255 {
+                errors.push(ApiErrorDetails {
+                    field: "translations.en.name".to_string(),
+                    message: "English name cannot exceed 255 characters".to_string(),
+                });
+            }
+
+            let de_val = if let Some(ref de) = trans.de {
+                let de_trimmed = de.name.trim();
+                if de_trimmed.is_empty() {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.de.name".to_string(),
+                        message: "German name cannot be empty or whitespace".to_string(),
+                    });
+                    None
+                } else if de_trimmed.len() > 255 {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.de.name".to_string(),
+                        message: "German name cannot exceed 255 characters".to_string(),
+                    });
+                    None
+                } else {
+                    Some(de_trimmed.to_string())
+                }
+            } else {
+                None
+            };
+
+            (en_trimmed.to_string(), de_val)
+        } else if !req.title.trim().is_empty() {
+            let title_trimmed = req.title.trim();
+            if title_trimmed.len() > 255 {
+                errors.push(ApiErrorDetails {
+                    field: "title".to_string(),
+                    message: "Title cannot exceed 255 characters".to_string(),
+                });
+            }
+            (title_trimmed.to_string(), None)
+        } else {
             errors.push(ApiErrorDetails {
                 field: "title".to_string(),
-                message: "Title is required and cannot be empty".to_string(),
+                message: "Title or translations is required".to_string(),
             });
-        } else if title_trimmed.len() > 255 {
-            errors.push(ApiErrorDetails {
-                field: "title".to_string(),
-                message: "Title cannot exceed 255 characters".to_string(),
-            });
-        }
+            (String::new(), None)
+        };
 
         let nav_label = match req.navigation_label {
             Some(ref l) => l.trim().to_string(),
-            None => title_trimmed.to_string(),
+            None => en_name.clone(),
         };
 
-        if nav_label.is_empty() {
+        if nav_label.is_empty() && errors.is_empty() {
             errors.push(ApiErrorDetails {
                 field: "navigation_label".to_string(),
                 message: "Navigation label cannot be empty".to_string(),
@@ -144,11 +184,11 @@ impl<'a> SpaSectionService<'a> {
         }
 
         let home_id = self.get_home_page_id().await?;
-        let base_key = generate_slug(title_trimmed);
+        let base_key = generate_slug(&en_name);
 
         let created = self
             .repo
-            .create_dynamic_for_page(home_id, &base_key, title_trimmed, &nav_label)
+            .create_dynamic_for_page(home_id, &base_key, &en_name, &nav_label, de_name.as_deref())
             .await?;
 
         self.repo
@@ -214,12 +254,60 @@ impl<'a> SpaSectionService<'a> {
             None
         };
 
+        let (en_opt, de_opt) = if let Some(ref trans) = req.translations {
+            let en_val = if let Some(ref en) = trans.en {
+                let trimmed = en.name.trim();
+                if trimmed.is_empty() {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.en.name".to_string(),
+                        message: "English name cannot be empty".to_string(),
+                    });
+                    None
+                } else if trimmed.len() > 255 {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.en.name".to_string(),
+                        message: "English name cannot exceed 255 characters".to_string(),
+                    });
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            } else {
+                None
+            };
+
+            let de_val = if let Some(ref de) = trans.de {
+                let trimmed = de.name.trim();
+                if trimmed.is_empty() {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.de.name".to_string(),
+                        message: "German name cannot be empty or whitespace".to_string(),
+                    });
+                    None
+                } else if trimmed.len() > 255 {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.de.name".to_string(),
+                        message: "German name cannot exceed 255 characters".to_string(),
+                    });
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            } else {
+                None
+            };
+
+            (en_val, de_val)
+        } else {
+            (None, None)
+        };
+
         if !errors.is_empty() {
             return Err(AppError::ValidationError(errors));
         }
 
         self.repo
-            .update_section(id, title_opt, nav_label_opt, req.is_visible)
+            .update_section(id, title_opt, nav_label_opt, req.is_visible, en_opt, de_opt)
             .await?;
 
         self.repo

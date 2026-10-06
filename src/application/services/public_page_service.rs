@@ -7,6 +7,7 @@ use sqlx::PgPool;
 use crate::application::dto::{
     PublicContentBlockDto, PublicMediaDto, PublicPageDto, PublicPageResponse, PublicSpaSectionDto,
 };
+use crate::domain::locale::Locale;
 use crate::domain::media::YoutubeUrlParser;
 use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 use crate::infrastructure::storage::StorageProvider;
@@ -25,9 +26,9 @@ impl PublicPageService {
     /// Fetches the complete grouped SPA structure for the home page.
     ///
     /// Architecture Note: Public SPA aggregation intentionally uses 3 bounded queries total
-    /// (1. Home Page Metadata, 2. Visible SpaSections, 3. Visible ContentBlocks + Media).
+    /// (1. Home Page Metadata, 2. Visible SpaSections with translations, 3. Visible ContentBlocks + Media with translations).
     /// Grouping is performed in-memory in O(N) time without database queries inside loops (NO N+1).
-    pub async fn get_home_page(&self) -> AppResult<PublicPageResponse> {
+    pub async fn get_home_page(&self, locale: Locale) -> AppResult<PublicPageResponse> {
         #[derive(sqlx::FromRow)]
         struct PageRow {
             id: Uuid,
@@ -43,8 +44,11 @@ impl PublicPageService {
             id: Uuid,
             key: String,
             title: String,
+            #[allow(dead_code)]
             navigation_label: String,
             sort_order: i32,
+            req_name: Option<String>,
+            en_name: Option<String>,
         }
 
         #[derive(sqlx::FromRow)]
@@ -65,6 +69,10 @@ impl PublicPageService {
             youtube_video_id: Option<String>,
             #[allow(dead_code)]
             media_sort_order: Option<i32>,
+            req_title: Option<String>,
+            req_text: Option<String>,
+            en_title: Option<String>,
+            en_text: Option<String>,
         }
 
         // Query 1: Bounded query for home page metadata
@@ -85,21 +93,28 @@ impl PublicPageService {
             seo_keywords: page_row.seo_keywords,
         };
 
-        // Query 2: Bounded query for visible non-deleted SpaSections ordered deterministically
+        // Query 2: Bounded query for visible non-deleted SpaSections with translations ordered deterministically
         let section_rows = sqlx::query_as::<_, SectionRow>(
             r#"
             SELECT
-                id,
-                section_key AS key,
-                title,
-                navigation_label,
-                sort_order
-            FROM spa_sections
-            WHERE page_id = $1 AND deleted_at IS NULL AND is_visible = TRUE
-            ORDER BY sort_order ASC, id ASC
+                s.id,
+                s.section_key AS key,
+                s.title,
+                s.navigation_label,
+                s.sort_order,
+                st_req.name AS req_name,
+                st_en.name AS en_name
+            FROM spa_sections s
+            LEFT JOIN spa_section_translations st_req
+                ON st_req.spa_section_id = s.id AND st_req.locale = $2
+            LEFT JOIN spa_section_translations st_en
+                ON st_en.spa_section_id = s.id AND st_en.locale = 'en'
+            WHERE s.page_id = $1 AND s.deleted_at IS NULL AND s.is_visible = TRUE
+            ORDER BY s.sort_order ASC, s.id ASC
             "#,
         )
         .bind(page_row.id)
+        .bind(locale.as_str())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
@@ -110,17 +125,40 @@ impl PublicPageService {
 
         for (idx, sec_row) in section_rows.into_iter().enumerate() {
             section_index_map.insert(sec_row.id, idx);
+
+            let effective_name = if let Some(ref name) = sec_row.req_name {
+                if !name.trim().is_empty() {
+                    name.clone()
+                } else if let Some(ref en) = sec_row.en_name {
+                    if !en.trim().is_empty() {
+                        en.clone()
+                    } else {
+                        sec_row.title.clone()
+                    }
+                } else {
+                    sec_row.title.clone()
+                }
+            } else if let Some(ref en) = sec_row.en_name {
+                if !en.trim().is_empty() {
+                    en.clone()
+                } else {
+                    sec_row.title.clone()
+                }
+            } else {
+                sec_row.title.clone()
+            };
+
             sections.push(PublicSpaSectionDto {
                 id: sec_row.id,
                 key: sec_row.key,
-                title: sec_row.title,
-                navigation_label: sec_row.navigation_label,
+                title: effective_name.clone(),
+                navigation_label: effective_name,
                 sort_order: sec_row.sort_order,
                 blocks: Vec::new(),
             });
         }
 
-        // Query 3: Bounded query for visible non-deleted ContentBlocks & Media
+        // Query 3: Bounded query for visible non-deleted ContentBlocks & Media with translations
         let joined_rows = sqlx::query_as::<_, JoinedBlockRow>(
             r#"
             SELECT
@@ -138,9 +176,17 @@ impl PublicPageService {
                 m.mime_type,
                 m.alt_text,
                 m.youtube_video_id,
-                sm.sort_order AS media_sort_order
+                sm.sort_order AS media_sort_order,
+                ct_req.title AS req_title,
+                ct_req.text AS req_text,
+                ct_en.title AS en_title,
+                ct_en.text AS en_text
             FROM sections s
             JOIN spa_sections ss ON ss.id = s.spa_section_id AND ss.page_id = s.page_id
+            LEFT JOIN content_block_translations ct_req
+                ON ct_req.content_block_id = s.id AND ct_req.locale = $2
+            LEFT JOIN content_block_translations ct_en
+                ON ct_en.content_block_id = s.id AND ct_en.locale = 'en'
             LEFT JOIN section_media sm ON s.id = sm.section_id
             LEFT JOIN media_assets m ON sm.media_asset_id = m.id AND m.deleted_at IS NULL AND m.status = 'active'
             WHERE s.page_id = $1
@@ -152,6 +198,7 @@ impl PublicPageService {
             "#
         )
         .bind(page_row.id)
+        .bind(locale.as_str())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
@@ -180,12 +227,40 @@ impl PublicPageService {
                         }
                     };
 
-                    let text = row
+                    let fallback_text = row
                         .content
                         .get("text")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+
+                    let text = if let Some(ref t) = row.req_text {
+                        if !t.trim().is_empty() {
+                            t.clone()
+                        } else if let Some(ref en_t) = row.en_text {
+                            if !en_t.trim().is_empty() {
+                                en_t.clone()
+                            } else {
+                                fallback_text
+                            }
+                        } else {
+                            fallback_text
+                        }
+                    } else if let Some(ref en_t) = row.en_text {
+                        if !en_t.trim().is_empty() {
+                            en_t.clone()
+                        } else {
+                            fallback_text
+                        }
+                    } else {
+                        fallback_text
+                    };
+
+                    let title = row
+                        .req_title
+                        .filter(|t| !t.trim().is_empty())
+                        .or_else(|| row.en_title.filter(|t| !t.trim().is_empty()))
+                        .or_else(|| row.title.filter(|t| !t.trim().is_empty()));
 
                     let font_family =
                         FontFamily::parse(&row.font_family).unwrap_or(FontFamily::Sans);
@@ -195,7 +270,7 @@ impl PublicPageService {
                     sections[sec_idx].blocks.push(PublicContentBlockDto {
                         id: row.block_id,
                         block_type,
-                        title: row.title,
+                        title,
                         text,
                         media: Vec::new(),
                         font_family,

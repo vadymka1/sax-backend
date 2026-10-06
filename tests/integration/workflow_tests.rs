@@ -564,6 +564,7 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
         block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
         title: Some("Cross Page Block".to_string()),
         text: "Cross page attempt text".to_string(),
+        translations: None,
         media_id: None,
         media_ids: None,
         font_family: None,
@@ -583,6 +584,7 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
         block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
         title: Some("Valid Home Block".to_string()),
         text: "Valid home text".to_string(),
+        translations: None,
         media_id: None,
         media_ids: None,
         font_family: None,
@@ -601,6 +603,7 @@ async fn test_service_cross_page_ownership_and_update_rollback() {
         block_type: None,
         title: Some("Updated Title Attempt".to_string()),
         text: Some("Updated text attempt".to_string()),
+        translations: None,
         media_id: None,
         media_ids: None,
         font_family: None,
@@ -670,6 +673,7 @@ async fn test_deterministic_content_block_ordering() {
                 block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
                 title: Some("Block 1".to_string()),
                 text: "Text 1".to_string(),
+                translations: None,
                 media_id: None,
                 media_ids: None,
                 font_family: None,
@@ -688,6 +692,7 @@ async fn test_deterministic_content_block_ordering() {
                 block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
                 title: Some("Block 2".to_string()),
                 text: "Text 2".to_string(),
+                translations: None,
                 media_id: None,
                 media_ids: None,
                 font_family: None,
@@ -706,6 +711,7 @@ async fn test_deterministic_content_block_ordering() {
                 block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
                 title: Some("Block 3".to_string()),
                 text: "Text 3".to_string(),
+                translations: None,
                 media_id: None,
                 media_ids: None,
                 font_family: None,
@@ -974,6 +980,7 @@ async fn test_admin_spa_sections_full_lifecycle() {
                 block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
                 title: Some("Award Block".to_string()),
                 text: "Award content".to_string(),
+                translations: None,
                 media_id: None,
                 media_ids: None,
                 font_family: None,
@@ -1267,6 +1274,7 @@ async fn test_concurrent_delete_vs_content_block_create() {
                 block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
                 title: Some("Compete Block".to_string()),
                 text: "Competing block text".to_string(),
+                translations: None,
                 is_visible: Some(true),
                 spa_section_id: sec_id,
                 media_id: None,
@@ -2109,6 +2117,7 @@ async fn test_concurrent_content_block_creation_same_section() {
             spa_sax_backend::application::dto::CreateSpaSectionRequest {
                 title: "Concurrent Blocks Section".to_string(),
                 navigation_label: None,
+                translations: None,
             },
         )
         .await
@@ -2119,6 +2128,7 @@ async fn test_concurrent_content_block_creation_same_section() {
         block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
         title: Some("Block 1".to_string()),
         text: "Text 1".to_string(),
+        translations: None,
         media_id: None,
         media_ids: None,
         font_family: None,
@@ -2131,6 +2141,7 @@ async fn test_concurrent_content_block_creation_same_section() {
         block_type: spa_sax_backend::domain::sections::ContentBlockType::Text,
         title: Some("Block 2".to_string()),
         text: "Text 2".to_string(),
+        translations: None,
         media_id: None,
         media_ids: None,
         font_family: None,
@@ -8771,15 +8782,15 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
         migrate_res.err()
     );
 
-    // Verify 0015, 0016, and 0017 are recorded as successfully applied in _sqlx_migrations
+    // Verify 0015, 0016, 0017, and 0018 are recorded as successfully applied in _sqlx_migrations
     let applied_migrations: Vec<(i64, String, bool)> = sqlx::query_as(
-        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17) ORDER BY version ASC",
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18) ORDER BY version ASC",
     )
     .fetch_all(&harness.pool)
     .await
     .unwrap();
 
-    assert_eq!(applied_migrations.len(), 3);
+    assert_eq!(applied_migrations.len(), 4);
     assert_eq!(applied_migrations[0].0, 15);
     assert_eq!(
         applied_migrations[0].1,
@@ -8797,6 +8808,10 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
     assert_eq!(applied_migrations[2].0, 17);
     assert_eq!(applied_migrations[2].1, "contact messages read state");
     assert!(applied_migrations[2].2);
+
+    assert_eq!(applied_migrations[3].0, 18);
+    assert_eq!(applied_migrations[3].1, "multilingual content translations");
+    assert!(applied_migrations[3].2);
 }
 
 #[tokio::test]
@@ -9342,4 +9357,979 @@ async fn test_cors_credentials_and_allowlist_enforcement() {
             .is_none(),
         "Disallowed origin must NOT receive Access-Control-Allow-Credentials header"
     );
+}
+
+// =========================================================================
+// MULTILINGUAL TESTS (V1 — EN & DE)
+// =========================================================================
+
+#[tokio::test]
+async fn test_multilingual_migration_backfill_verification() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // 1. Verify spa_sections have English translation rows backfilled
+    let unmigrated_spa_sections: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM spa_sections s
+        LEFT JOIN spa_section_translations t
+            ON t.spa_section_id = s.id AND t.locale = 'en'
+        WHERE t.id IS NULL
+        "#,
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        unmigrated_spa_sections.0, 0,
+        "All spa_sections must have an 'en' translation row"
+    );
+
+    // 2. Verify sections (content blocks) have English translation rows backfilled
+    let unmigrated_content_blocks: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM sections s
+        LEFT JOIN content_block_translations t
+            ON t.content_block_id = s.id AND t.locale = 'en'
+        WHERE t.id IS NULL
+        "#,
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        unmigrated_content_blocks.0, 0,
+        "All content blocks (sections) must have an 'en' translation row"
+    );
+
+    // 3. Verify translation content matches legacy columns
+    let mismatched_sections: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM spa_sections s
+        JOIN spa_section_translations t
+            ON t.spa_section_id = s.id AND t.locale = 'en'
+        WHERE t.name != s.title
+        "#,
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        mismatched_sections.0, 0,
+        "Backfilled spa_section_translations.name must match spa_sections.title"
+    );
+
+    // 4. Verify invalid locale rejection at DB constraint level
+    let dummy_id = uuid::Uuid::new_v4();
+    let sec_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM spa_sections LIMIT 1")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    let invalid_locale_insert = sqlx::query(
+        "INSERT INTO spa_section_translations (id, spa_section_id, locale, name) VALUES ($1, $2, 'fr', 'Invalide')"
+    )
+    .bind(dummy_id)
+    .bind(sec_id.0)
+    .execute(&harness.pool)
+    .await;
+
+    assert!(
+        invalid_locale_insert.is_err(),
+        "DB CHECK constraint must reject non en/de locales"
+    );
+}
+
+#[tokio::test]
+async fn test_public_page_default_and_explicit_en_locale() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // 1. GET /api/v1/public/page without locale param -> English default
+    let res_default = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(res_default.status(), Status::Ok);
+    let page_default: SingleResponse<PublicPageResponse> = res_default.into_json().await.unwrap();
+
+    // 2. GET /api/v1/public/page?locale=en -> explicit English
+    let res_en = harness
+        .client
+        .get("/api/v1/public/page?locale=en")
+        .dispatch()
+        .await;
+    assert_eq!(res_en.status(), Status::Ok);
+    let page_en: SingleResponse<PublicPageResponse> = res_en.into_json().await.unwrap();
+
+    // 3. Verify explicit en matches default exactly
+    assert_eq!(
+        page_default.data.sections.len(),
+        page_en.data.sections.len()
+    );
+    for (sec_def, sec_en) in page_default
+        .data
+        .sections
+        .iter()
+        .zip(page_en.data.sections.iter())
+    {
+        assert_eq!(sec_def.id, sec_en.id);
+        assert_eq!(sec_def.title, sec_en.title);
+        assert_eq!(sec_def.blocks.len(), sec_en.blocks.len());
+        for (b_def, b_en) in sec_def.blocks.iter().zip(sec_en.blocks.iter()) {
+            assert_eq!(b_def.id, b_en.id);
+            assert_eq!(b_def.title, b_en.title);
+            assert_eq!(b_def.text, b_en.text);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_public_page_locale_de_and_fallback_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // 1. Create a section with EN and DE translations
+    let sec_req = serde_json::json!({
+        "translations": {
+            "en": { "name": "Concerts & Tours" },
+            "de": { "name": "Konzerte & Tourneen" }
+        }
+    });
+    let sec_res = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&sec_req)
+        .dispatch()
+        .await;
+    assert_eq!(sec_res.status(), Status::Created);
+    let created_sec: SingleResponse<AdminSpaSectionDto> = sec_res.into_json().await.unwrap();
+    let sec_id = created_sec.data.id;
+
+    // 2. Create Block 1 with EN and DE translations
+    let block1_req = serde_json::json!({
+        "spa_section_id": sec_id,
+        "block_type": "text",
+        "translations": {
+            "en": { "title": "Summer Tour", "text": "Touring across Europe in Summer." },
+            "de": { "title": "Sommertour", "text": "Tournee durch Europa im Sommer." }
+        }
+    });
+    let b1_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&block1_req)
+        .dispatch()
+        .await;
+    assert_eq!(b1_res.status(), Status::Created);
+    let b1_data: SingleResponse<AdminContentBlockDto> = b1_res.into_json().await.unwrap();
+    let b1_id = b1_data.data.id;
+
+    // 3. Create Block 2 with ONLY EN translation (DE missing -> should fallback to EN)
+    let block2_req = serde_json::json!({
+        "spa_section_id": sec_id,
+        "block_type": "text",
+        "translations": {
+            "en": { "title": "Winter Gala", "text": "Exclusive winter gala concert." }
+        }
+    });
+    let b2_res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&block2_req)
+        .dispatch()
+        .await;
+    assert_eq!(b2_res.status(), Status::Created);
+    let b2_data: SingleResponse<AdminContentBlockDto> = b2_res.into_json().await.unwrap();
+    let b2_id = b2_data.data.id;
+
+    // 4. Request public page with locale=de
+    let public_de = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(public_de.status(), Status::Ok);
+    let page_de: SingleResponse<PublicPageResponse> = public_de.into_json().await.unwrap();
+
+    let target_sec = page_de
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .expect("Created section must be present in public page");
+
+    // Section title should be localized to DE:
+    assert_eq!(target_sec.title, "Konzerte & Tourneen");
+
+    let target_b1 = target_sec
+        .blocks
+        .iter()
+        .find(|b| b.id == b1_id)
+        .expect("Block 1 must be present");
+    // Block 1 has German translation:
+    assert_eq!(target_b1.title.as_deref(), Some("Sommertour"));
+    assert_eq!(target_b1.text, "Tournee durch Europa im Sommer.");
+
+    let target_b2 = target_sec
+        .blocks
+        .iter()
+        .find(|b| b.id == b2_id)
+        .expect("Block 2 must be present");
+    // Block 2 lacks German translation -> FALLBACK to English:
+    assert_eq!(target_b2.title.as_deref(), Some("Winter Gala"));
+    assert_eq!(target_b2.text, "Exclusive winter gala concert.");
+
+    // Cleanup
+    common::cleanup_content_block(&harness.pool, b2_id)
+        .await
+        .unwrap();
+    common::cleanup_content_block(&harness.pool, b1_id)
+        .await
+        .unwrap();
+    common::cleanup_spa_section(&harness.pool, sec_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_public_page_invalid_locale_returns_bad_request() {
+    let harness = TestHarness::new().await;
+
+    // Test invalid locales: "fr", "abc", "EN", "de-DE", "es"
+    for invalid in &["fr", "abc", "EN", "de-DE", "es", "invalid-loc"] {
+        let res = harness
+            .client
+            .get(format!("/api/v1/public/page?locale={}", invalid))
+            .dispatch()
+            .await;
+        assert_eq!(
+            res.status(),
+            Status::BadRequest,
+            "Locale '{}' must be rejected with 400 Bad Request",
+            invalid
+        );
+
+        let body: serde_json::Value = res.into_json().await.unwrap();
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid locale"));
+    }
+}
+
+#[tokio::test]
+async fn test_admin_spa_section_translations_lifecycle_and_patch() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // 1. Create with EN only -> succeeds
+    let req_en_only = serde_json::json!({
+        "translations": {
+            "en": { "name": "Festivals 2026" }
+        }
+    });
+    let res1 = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&req_en_only)
+        .dispatch()
+        .await;
+    assert_eq!(res1.status(), Status::Created);
+    let sec1: SingleResponse<AdminSpaSectionDto> = res1.into_json().await.unwrap();
+    assert_eq!(sec1.data.translations.en.name, "Festivals 2026");
+    assert!(
+        sec1.data.translations.de.is_none(),
+        "DE translation must be absent (null)"
+    );
+
+    // 2. GET admin section -> returns actual translations (NO fallback in admin)
+    let get_res = harness
+        .client
+        .get(format!("/api/v1/admin/spa-sections/{}", sec1.data.id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_res.status(), Status::Ok);
+    let get_dto: SingleResponse<AdminSpaSectionDto> = get_res.into_json().await.unwrap();
+    assert_eq!(get_dto.data.translations.en.name, "Festivals 2026");
+    assert!(
+        get_dto.data.translations.de.is_none(),
+        "Admin GET must not apply fallback: de should be null"
+    );
+
+    // 3. Create with DE only -> MUST FAIL (EN is required)
+    let req_de_only = serde_json::json!({
+        "translations": {
+            "de": { "name": "Festivals 2026 DE" }
+        }
+    });
+    let res_de_only = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&req_de_only)
+        .dispatch()
+        .await;
+    assert_eq!(res_de_only.status(), Status::UnprocessableEntity);
+
+    // 4. PATCH DE translation -> EN unchanged, DE set
+    let patch_de = serde_json::json!({
+        "translations": {
+            "de": { "name": "Festivals 2026 DE Neu" }
+        }
+    });
+    let res_patch_de = harness
+        .client
+        .patch(format!("/api/v1/admin/spa-sections/{}", sec1.data.id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_de)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_de.status(), Status::Ok);
+    let patched_de_dto: SingleResponse<AdminSpaSectionDto> =
+        res_patch_de.into_json().await.unwrap();
+    assert_eq!(
+        patched_de_dto.data.translations.en.name, "Festivals 2026",
+        "EN must remain unchanged"
+    );
+    assert_eq!(
+        patched_de_dto
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.name.as_str()),
+        Some("Festivals 2026 DE Neu"),
+        "DE must be updated"
+    );
+
+    // 5. PATCH EN translation -> EN updated, DE unchanged
+    let patch_en = serde_json::json!({
+        "translations": {
+            "en": { "name": "Festivals 2026 Worldwide" }
+        }
+    });
+    let res_patch_en = harness
+        .client
+        .patch(format!("/api/v1/admin/spa-sections/{}", sec1.data.id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_en)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_en.status(), Status::Ok);
+    let patched_en_dto: SingleResponse<AdminSpaSectionDto> =
+        res_patch_en.into_json().await.unwrap();
+    assert_eq!(
+        patched_en_dto.data.translations.en.name, "Festivals 2026 Worldwide",
+        "EN must be updated"
+    );
+    assert_eq!(
+        patched_en_dto
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.name.as_str()),
+        Some("Festivals 2026 DE Neu"),
+        "DE must remain unchanged"
+    );
+
+    // Cleanup
+    common::cleanup_spa_section(&harness.pool, sec1.data.id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_admin_content_block_translations_and_media_stability() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // Use canonical about-us section
+    let sec_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+
+    let media_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO media_assets (id, storage_provider, media_type, original_filename, stored_filename, mime_type, file_size, storage_key, status) VALUES ($1, 'local', 'image', 'photo.jpg', 'stored.jpg', 'image/jpeg', 1024, 'uploads/test.jpg', 'active')"
+    )
+    .bind(media_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 1. Create content block (text_image) with EN and DE translations and media
+    let create_req = serde_json::json!({
+        "spa_section_id": sec_id,
+        "block_type": "text_image",
+        "media_id": media_id,
+        "translations": {
+            "en": { "title": "Biography", "text": "Artist biography in English." },
+            "de": { "title": "Biografie", "text": "Künstlerbiografie auf Deutsch." }
+        }
+    });
+    let res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&create_req)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Created);
+    let created: SingleResponse<AdminContentBlockDto> = res.into_json().await.unwrap();
+    let block_id = created.data.id;
+
+    assert_eq!(
+        created.data.translations.en.text,
+        "Artist biography in English."
+    );
+    assert_eq!(
+        created.data.translations.en.title.as_deref(),
+        Some("Biography")
+    );
+    assert_eq!(
+        created
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Künstlerbiografie auf Deutsch.")
+    );
+    assert_eq!(
+        created
+            .data
+            .translations
+            .de
+            .as_ref()
+            .and_then(|d| d.title.as_deref()),
+        Some("Biografie")
+    );
+    assert_eq!(created.data.media.len(), 1);
+    assert_eq!(created.data.media[0].id, media_id);
+
+    // 2. PATCH DE translation only -> verify media unchanged and DE updated
+    let patch_de = serde_json::json!({
+        "translations": {
+            "de": { "title": "Neue Biografie", "text": "Aktualisierte deutsche Biografie." }
+        }
+    });
+    let res_patch_de = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_de)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_de.status(), Status::Ok);
+    let patched_de: SingleResponse<AdminContentBlockDto> = res_patch_de.into_json().await.unwrap();
+    assert_eq!(
+        patched_de.data.translations.en.text, "Artist biography in English.",
+        "EN text must not change"
+    );
+    assert_eq!(
+        patched_de
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Aktualisierte deutsche Biografie.")
+    );
+    assert_eq!(
+        patched_de.data.media.len(),
+        1,
+        "Media must remain intact when patching DE"
+    );
+    assert_eq!(patched_de.data.media[0].id, media_id);
+
+    // 3. PATCH EN translation only -> verify media unchanged and EN updated
+    let patch_en = serde_json::json!({
+        "translations": {
+            "en": { "title": "Updated Biography", "text": "Updated biography in English." }
+        }
+    });
+    let res_patch_en = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_en)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_en.status(), Status::Ok);
+    let patched_en: SingleResponse<AdminContentBlockDto> = res_patch_en.into_json().await.unwrap();
+    assert_eq!(
+        patched_en.data.translations.en.text,
+        "Updated biography in English."
+    );
+    assert_eq!(
+        patched_en
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Aktualisierte deutsche Biografie."),
+        "DE text must not change when updating EN"
+    );
+    assert_eq!(
+        patched_en.data.media.len(),
+        1,
+        "Media must remain intact when patching EN"
+    );
+    assert_eq!(patched_en.data.media[0].id, media_id);
+
+    // 4. GET block directly and verify both translations and media intact
+    let get_res = harness
+        .client
+        .get(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_res.status(), Status::Ok);
+    let get_dto: SingleResponse<AdminContentBlockDto> = get_res.into_json().await.unwrap();
+    assert_eq!(
+        get_dto.data.translations.en.text,
+        "Updated biography in English."
+    );
+    assert_eq!(
+        get_dto
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Aktualisierte deutsche Biografie.")
+    );
+    assert_eq!(get_dto.data.media.len(), 1);
+    assert_eq!(get_dto.data.media[0].id, media_id);
+
+    // Cleanup
+    common::cleanup_content_block(&harness.pool, block_id)
+        .await
+        .unwrap();
+    common::cleanup_media(&harness.pool, media_id)
+        .await
+        .unwrap();
+}
+
+// =========================================================================
+// MULTILINGUAL V1.1 TESTS (FALLBACK & PARTIAL PATCH FIXES)
+// =========================================================================
+
+#[tokio::test]
+async fn test_multilingual_v1_1_title_fallback_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let sec_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+
+    // 1. Create a block with EN title = "Biography" and EN text = "English body"
+    let create_req = serde_json::json!({
+        "spa_section_id": sec_id,
+        "block_type": "text",
+        "translations": {
+            "en": { "title": "Biography", "text": "English body" }
+        }
+    });
+    let res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&create_req)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Created);
+    let created: SingleResponse<AdminContentBlockDto> = res.into_json().await.unwrap();
+    let block_id = created.data.id;
+
+    // Test 1: Empty DE title fallback -> should return EN title "Biography"
+    // Insert DE translation with empty string title directly
+    sqlx::query(
+        "INSERT INTO content_block_translations (content_block_id, locale, title, text) VALUES ($1, 'de', '', 'Deutscher Inhalt')"
+    )
+    .bind(block_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let res_de_empty = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(res_de_empty.status(), Status::Ok);
+    let page_de_empty: SingleResponse<PublicPageResponse> = res_de_empty.into_json().await.unwrap();
+    let sec = page_de_empty
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    let block = sec.blocks.iter().find(|b| b.id == block_id).unwrap();
+    assert_eq!(
+        block.title.as_deref(),
+        Some("Biography"),
+        "Empty DE title must fall back to EN title"
+    );
+    assert_eq!(block.text, "Deutscher Inhalt", "DE text must be returned");
+
+    // Test 2: Whitespace DE title fallback -> should return EN title "Biography"
+    sqlx::query(
+        "UPDATE content_block_translations SET title = '   ' WHERE content_block_id = $1 AND locale = 'de'"
+    )
+    .bind(block_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let res_de_ws = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(res_de_ws.status(), Status::Ok);
+    let page_de_ws: SingleResponse<PublicPageResponse> = res_de_ws.into_json().await.unwrap();
+    let sec = page_de_ws
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    let block = sec.blocks.iter().find(|b| b.id == block_id).unwrap();
+    assert_eq!(
+        block.title.as_deref(),
+        Some("Biography"),
+        "Whitespace DE title must fall back to EN title"
+    );
+
+    // Test 3: Valid DE title is used when provided
+    sqlx::query(
+        "UPDATE content_block_translations SET title = 'Biografie' WHERE content_block_id = $1 AND locale = 'de'"
+    )
+    .bind(block_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let res_de_valid = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(res_de_valid.status(), Status::Ok);
+    let page_de_valid: SingleResponse<PublicPageResponse> = res_de_valid.into_json().await.unwrap();
+    let sec = page_de_valid
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    let block = sec.blocks.iter().find(|b| b.id == block_id).unwrap();
+    assert_eq!(
+        block.title.as_deref(),
+        Some("Biografie"),
+        "Valid DE title must be returned"
+    );
+    assert_eq!(block.text, "Deutscher Inhalt");
+
+    // Cleanup
+    common::cleanup_content_block(&harness.pool, block_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_multilingual_v1_1_de_patch_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    let sec_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+
+    let media_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO media_assets (id, storage_provider, media_type, original_filename, stored_filename, mime_type, file_size, storage_key, status) VALUES ($1, 'local', 'image', 'photo.jpg', 'stored.jpg', 'image/jpeg', 1024, 'uploads/test.jpg', 'active')"
+    )
+    .bind(media_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 1. Create block with EN only (DE missing)
+    let create_req = serde_json::json!({
+        "spa_section_id": sec_id,
+        "block_type": "text_image",
+        "media_id": media_id,
+        "translations": {
+            "en": { "title": "Original EN Title", "text": "Original EN Text" }
+        }
+    });
+    let res = harness
+        .client
+        .post("/api/v1/admin/content-blocks")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&create_req)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Created);
+    let created: SingleResponse<AdminContentBlockDto> = res.into_json().await.unwrap();
+    let block_id = created.data.id;
+    assert!(created.data.translations.de.is_none());
+
+    // Test Case B: Title-only PATCH when DE is missing -> MUST FAIL with 422
+    let patch_missing_title_only = serde_json::json!({
+        "translations": {
+            "de": { "title": "Biografie" }
+        }
+    });
+    let res_fail = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_missing_title_only)
+        .dispatch()
+        .await;
+    assert_eq!(
+        res_fail.status(),
+        Status::UnprocessableEntity,
+        "Title-only PATCH on missing DE translation must be rejected with 422"
+    );
+
+    // Verify DB/Admin state: DE still missing, EN unchanged, media unchanged
+    let get_after_fail = harness
+        .client
+        .get(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_after_fail.status(), Status::Ok);
+    let dto_after_fail: SingleResponse<AdminContentBlockDto> =
+        get_after_fail.into_json().await.unwrap();
+    assert!(
+        dto_after_fail.data.translations.de.is_none(),
+        "DE must remain missing after failed PATCH"
+    );
+    assert_eq!(
+        dto_after_fail.data.translations.en.title.as_deref(),
+        Some("Original EN Title")
+    );
+    assert_eq!(dto_after_fail.data.translations.en.text, "Original EN Text");
+    assert_eq!(dto_after_fail.data.media.len(), 1);
+    assert_eq!(dto_after_fail.data.media[0].id, media_id);
+
+    // Test Case: Create new DE with text only (title optional) -> MUST SUCCEED
+    let patch_new_text_only = serde_json::json!({
+        "translations": {
+            "de": { "text": "Erster deutscher Text" }
+        }
+    });
+    let res_create_de = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_new_text_only)
+        .dispatch()
+        .await;
+    assert_eq!(res_create_de.status(), Status::Ok);
+    let dto_created_de: SingleResponse<AdminContentBlockDto> =
+        res_create_de.into_json().await.unwrap();
+    assert_eq!(
+        dto_created_de
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Erster deutscher Text")
+    );
+    assert_eq!(
+        dto_created_de
+            .data
+            .translations
+            .de
+            .as_ref()
+            .and_then(|d| d.title.as_deref()),
+        None
+    );
+    assert_eq!(
+        dto_created_de.data.translations.en.text, "Original EN Text",
+        "EN must remain unchanged"
+    );
+    assert_eq!(
+        dto_created_de.data.media.len(),
+        1,
+        "Media must remain unchanged"
+    );
+
+    // Test Case A: Existing DE title-only PATCH -> MUST SUCCEED, preserving existing text
+    let patch_existing_title_only = serde_json::json!({
+        "translations": {
+            "de": { "title": "Neuer Titel" }
+        }
+    });
+    let res_patch_title = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_existing_title_only)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_title.status(), Status::Ok);
+    let dto_patched_title: SingleResponse<AdminContentBlockDto> =
+        res_patch_title.into_json().await.unwrap();
+    assert_eq!(
+        dto_patched_title
+            .data
+            .translations
+            .de
+            .as_ref()
+            .and_then(|d| d.title.as_deref()),
+        Some("Neuer Titel"),
+        "DE title must be updated"
+    );
+    assert_eq!(
+        dto_patched_title
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Erster deutscher Text"),
+        "DE text must be preserved"
+    );
+    assert_eq!(
+        dto_patched_title.data.translations.en.text, "Original EN Text",
+        "EN must remain unchanged"
+    );
+    assert_eq!(
+        dto_patched_title.data.media.len(),
+        1,
+        "Media must remain unchanged"
+    );
+
+    // Test Case: Existing DE text-only PATCH -> MUST SUCCEED, preserving existing title
+    let patch_existing_text_only = serde_json::json!({
+        "translations": {
+            "de": { "text": "Zweiter deutscher Text" }
+        }
+    });
+    let res_patch_text = harness
+        .client
+        .patch(format!("/api/v1/admin/content-blocks/{}", block_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_existing_text_only)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_text.status(), Status::Ok);
+    let dto_patched_text: SingleResponse<AdminContentBlockDto> =
+        res_patch_text.into_json().await.unwrap();
+    assert_eq!(
+        dto_patched_text
+            .data
+            .translations
+            .de
+            .as_ref()
+            .and_then(|d| d.title.as_deref()),
+        Some("Neuer Titel"),
+        "DE title must be preserved"
+    );
+    assert_eq!(
+        dto_patched_text
+            .data
+            .translations
+            .de
+            .as_ref()
+            .map(|d| d.text.as_str()),
+        Some("Zweiter deutscher Text"),
+        "DE text must be updated"
+    );
+    assert_eq!(
+        dto_patched_text.data.translations.en.text, "Original EN Text",
+        "EN must remain unchanged"
+    );
+    assert_eq!(
+        dto_patched_text.data.media.len(),
+        1,
+        "Media must remain unchanged"
+    );
+
+    // Cleanup
+    common::cleanup_content_block(&harness.pool, block_id)
+        .await
+        .unwrap();
+    common::cleanup_media(&harness.pool, media_id)
+        .await
+        .unwrap();
 }

@@ -6,6 +6,18 @@ use uuid::Uuid;
 use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ContentBlockTranslationDto {
+    pub title: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ContentBlockTranslationsDto {
+    pub en: ContentBlockTranslationDto,
+    pub de: Option<ContentBlockTranslationDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BlockAttachedMediaDto {
     pub id: Uuid,
     #[serde(alias = "type")]
@@ -31,6 +43,7 @@ pub struct AdminContentBlockDto {
     pub block_type: ContentBlockType,
     pub title: Option<String>,
     pub text: String,
+    pub translations: ContentBlockTranslationsDto,
     pub media: Vec<BlockAttachedMediaDto>,
     pub font_family: FontFamily,
     pub font_size: FontSize,
@@ -40,17 +53,44 @@ pub struct AdminContentBlockDto {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateContentBlockTranslationRequest {
+    pub title: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateContentBlockTranslationsRequest {
+    pub en: Option<CreateContentBlockTranslationRequest>,
+    pub de: Option<CreateContentBlockTranslationRequest>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateContentBlockRequest {
     pub spa_section_id: Uuid,
     pub block_type: ContentBlockType,
     pub title: Option<String>,
+    #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub translations: Option<CreateContentBlockTranslationsRequest>,
     pub media_id: Option<Uuid>,
     pub media_ids: Option<Vec<Uuid>>,
     pub font_family: Option<FontFamily>,
     pub font_size: Option<FontSize>,
     pub is_visible: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct UpdateContentBlockTranslationRequest {
+    pub title: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct UpdateContentBlockTranslationsRequest {
+    pub en: Option<UpdateContentBlockTranslationRequest>,
+    pub de: Option<UpdateContentBlockTranslationRequest>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -59,6 +99,8 @@ pub struct UpdateContentBlockRequest {
     pub block_type: Option<ContentBlockType>,
     pub title: Option<String>,
     pub text: Option<String>,
+    #[serde(default)]
+    pub translations: Option<UpdateContentBlockTranslationsRequest>,
     pub media_id: Option<Option<Uuid>>,
     pub media_ids: Option<Option<Vec<Uuid>>>,
     pub font_family: Option<FontFamily>,

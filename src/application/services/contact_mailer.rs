@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::config::SmtpConfig;
 
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait ContactMailer: Send + Sync {
     async fn send_contact_notification(
         &self,

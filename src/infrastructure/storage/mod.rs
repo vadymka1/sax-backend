@@ -5,6 +5,7 @@ use tokio::fs;
 use crate::shared::errors::{AppError, AppResult};
 
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait StorageProvider: Send + Sync {
     async fn upload(&self, relative_path: &str, data: &[u8]) -> AppResult<String>;
     async fn move_file(&self, temp_file_path: &Path, relative_path: &str) -> AppResult<String>;

@@ -1,9 +1,7 @@
 use sqlx::{PgPool, Postgres, Transaction};
 use validator::ValidateEmail;
 
-use crate::application::dto::{
-    AuthTokensDto, LoginRequest, LogoutRequest, RefreshTokenRequest, UserDto,
-};
+use crate::application::dto::{AuthTokensDto, LoginRequest, RefreshTokenDataDto, UserDto};
 use crate::config::AppConfig;
 use crate::domain::users::User;
 use crate::infrastructure::auth::{PasswordService, TokenService};
@@ -27,7 +25,7 @@ impl<'a> AuthService<'a> {
         Self { pool, config }
     }
 
-    pub async fn login(&self, req: LoginRequest) -> AppResult<AuthTokensDto> {
+    pub async fn login(&self, req: LoginRequest) -> AppResult<(AuthTokensDto, String)> {
         let email_norm = req.email.trim().to_lowercase();
         if !ValidateEmail::validate_email(&email_norm) {
             return Err(AppError::InvalidCredentials);
@@ -99,17 +97,18 @@ impl<'a> AuthService<'a> {
             updated_at: user.updated_at,
         };
 
-        Ok(AuthTokensDto {
+        let dto = AuthTokensDto {
             access_token,
-            refresh_token,
             token_type: "Bearer".to_string(),
             expires_in: self.config.jwt_access_ttl_seconds,
             user: user_dto,
-        })
+        };
+
+        Ok((dto, refresh_token))
     }
 
-    pub async fn refresh(&self, req: RefreshTokenRequest) -> AppResult<(String, String)> {
-        let old_hash = TokenService::hash_refresh_token(&req.refresh_token);
+    pub async fn refresh(&self, refresh_token: &str) -> AppResult<(RefreshTokenDataDto, String)> {
+        let old_hash = TokenService::hash_refresh_token(refresh_token);
 
         let mut tx: Transaction<'_, Postgres> = self
             .pool
@@ -179,11 +178,29 @@ impl<'a> AuthService<'a> {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        Ok((new_access, new_refresh))
+        let user_dto = UserDto {
+            id: user.id,
+            email: user.email,
+            display_name: user.display_name,
+            role: user.role,
+            is_active: user.is_active,
+            last_login_at: user.last_login_at,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+        };
+
+        let response = RefreshTokenDataDto {
+            access_token: new_access,
+            token_type: "Bearer".to_string(),
+            expires_in: self.config.jwt_access_ttl_seconds,
+            user: user_dto,
+        };
+
+        Ok((response, new_refresh))
     }
 
-    pub async fn logout(&self, req: LogoutRequest) -> AppResult<()> {
-        let hash = TokenService::hash_refresh_token(&req.refresh_token);
+    pub async fn logout(&self, refresh_token: &str) -> AppResult<()> {
+        let hash = TokenService::hash_refresh_token(refresh_token);
         sqlx::query("UPDATE user_refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = $1 AND revoked_at IS NULL")
             .bind(&hash)
             .execute(self.pool)

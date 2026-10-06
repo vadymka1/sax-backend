@@ -15,11 +15,6 @@
 			"key": "accessToken",
 			"value": "",
 			"type": "string"
-		},
-		{
-			"key": "refreshToken",
-			"value": "",
-			"type": "string"
 		}
 	],
 	"item": [
@@ -105,12 +100,27 @@
 							"script": {
 								"exec": [
 									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
-									"pm.test('Contains access and refresh tokens', function () {",
+									"pm.test('Contains access token, token_type, expires_in, and user', function () {",
 									"    var jsonData = pm.response.json();",
 									"    pm.expect(jsonData.data.access_token).to.be.a('string');",
-									"    pm.expect(jsonData.data.refresh_token).to.be.a('string');",
+									"    pm.expect(jsonData.data.token_type).to.eql('Bearer');",
+									"    pm.expect(jsonData.data.expires_in).to.be.a('number');",
+									"    pm.expect(jsonData.data.user).to.be.an('object');",
+									"    pm.expect(jsonData.data.user.email).to.eql('superadmin@example.com');",
 									"    pm.collectionVariables.set('accessToken', jsonData.data.access_token);",
-									"    pm.collectionVariables.set('refreshToken', jsonData.data.refresh_token);",
+									"});",
+									"pm.test('Refresh token is absent from JSON response', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.refresh_token).to.be.undefined;",
+									"    pm.expect(jsonData.refresh_token).to.be.undefined;",
+									"});",
+									"pm.test('Sets HttpOnly refresh_token cookie', function () {",
+									"    var setCookie = pm.response.headers.get('Set-Cookie');",
+									"    if (setCookie) {",
+									"        pm.expect(setCookie).to.include('refresh_token=');",
+									"        pm.expect(setCookie.toLowerCase()).to.include('httponly');",
+									"        pm.expect(setCookie).to.include('Path=/api/v1/auth');",
+									"    }",
 									"});"
 								],
 								"type": "text/javascript"
@@ -155,18 +165,46 @@
 					]
 				},
 				{
-					"name": "Refresh Token Rotation",
+					"name": "Get Current User Profile (/me)",
 					"request": {
-						"method": "POST",
+						"method": "GET",
 						"header": [
 							{
-								"key": "Content-Type",
-								"value": "application/json"
+								"key": "Authorization",
+								"value": "Bearer {{accessToken}}"
 							}
 						],
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/me",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "me"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Returns authenticated user profile', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.email).to.eql('superadmin@example.com');",
+									"    pm.expect(jsonData.data.role).to.eql('super_admin');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Refresh Token - Cookie Rotation",
+					"request": {
+						"method": "POST",
+						"header": [],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"refresh_token\": \"{{refreshToken}}\"\n}"
+							"raw": ""
 						},
 						"url": {
 							"raw": "{{baseUrl}}/api/v1/auth/refresh",
@@ -180,11 +218,134 @@
 							"script": {
 								"exec": [
 									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
-									"pm.test('Returns new token pair', function () {",
+									"pm.test('Returns new access token and user', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.access_token).to.be.a('string');",
+									"    pm.expect(jsonData.data.token_type).to.eql('Bearer');",
+									"    pm.expect(jsonData.data.expires_in).to.be.a('number');",
+									"    pm.expect(jsonData.data.user).to.be.an('object');",
+									"    pm.collectionVariables.set('accessToken', jsonData.data.access_token);",
+									"});",
+									"pm.test('Refresh token is absent from JSON response', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.refresh_token).to.be.undefined;",
+									"    pm.expect(jsonData.refresh_token).to.be.undefined;",
+									"});",
+									"pm.test('Rotates refresh_token cookie via Set-Cookie', function () {",
+									"    var setCookie = pm.response.headers.get('Set-Cookie');",
+									"    if (setCookie) {",
+									"        pm.expect(setCookie).to.include('refresh_token=');",
+									"        pm.expect(setCookie.toLowerCase()).to.include('httponly');",
+									"        pm.expect(setCookie).to.include('Path=/api/v1/auth');",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Logout - Revoke Session & Clear Cookie",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": ""
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/logout",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "logout"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Returns logout success message', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.data.message).to.include('logged out');",
+									"});",
+									"pm.test('Clears refresh_token cookie', function () {",
+									"    var setCookie = pm.response.headers.get('Set-Cookie');",
+									"    if (setCookie) {",
+									"        pm.expect(setCookie).to.include('refresh_token=');",
+									"        pm.expect(setCookie).to.match(/(Max-Age=0|max-age=0|expires=)/i);",
+									"    }",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Post-Logout Refresh Fails (Unauthorized)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": ""
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/refresh",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "refresh"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 401 Unauthorized', function () {",
+									"    pm.response.to.have.status(401);",
+									"});",
+									"pm.test('Rejects refresh after logout/cleared cookie', function () {",
+									"    var jsonData = pm.response.json();",
+									"    pm.expect(jsonData.error.code).to.eql('UNAUTHORIZED');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "Re-authenticate Super Admin (Suite Continuation)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"superadmin@example.com\",\n  \"password\": \"SuperPassword123!\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/api/v1/auth/login",
+							"host": ["{{baseUrl}}"],
+							"path": ["api", "v1", "auth", "login"]
+						}
+					},
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('Status code is 200 OK', function () { pm.response.to.have.status(200); });",
+									"pm.test('Stores fresh accessToken for subsequent admin requests', function () {",
 									"    var jsonData = pm.response.json();",
 									"    pm.expect(jsonData.data.access_token).to.be.a('string');",
 									"    pm.collectionVariables.set('accessToken', jsonData.data.access_token);",
-									"    pm.collectionVariables.set('refreshToken', jsonData.data.refresh_token);",
 									"});"
 								],
 								"type": "text/javascript"

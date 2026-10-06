@@ -1,4 +1,5 @@
-use rocket::http::{Header, Method, Status};
+use rocket::http::{Cookie, Header, Method, Status};
+use rocket::local::asynchronous::Client;
 use serde_json::json;
 
 use argon2::PasswordHasher;
@@ -208,37 +209,98 @@ async fn test_authentication_login_and_refresh_flow() {
     let res = req.dispatch().await;
     assert_eq!(res.status(), Status::Ok);
 
+    // Verify Set-Cookie header exists and contains canonical attributes
+    let raw_refresh_token = {
+        let set_cookie_hdr = res
+            .headers()
+            .get("Set-Cookie")
+            .find(|h| h.starts_with("refresh_token="))
+            .expect("Set-Cookie header for refresh_token must be present");
+        assert!(set_cookie_hdr.contains("HttpOnly"));
+        assert!(set_cookie_hdr.contains("Path=/api/v1/auth"));
+        assert!(set_cookie_hdr.contains("SameSite=Lax"));
+
+        let token = set_cookie_hdr
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("refresh_token=")
+            .unwrap();
+        assert_eq!(token.len(), 64);
+        token.to_string()
+    };
+
     let body: serde_json::Value = res.into_json().await.unwrap();
     let access_token = body["data"]["access_token"].as_str().unwrap();
-    let refresh_token = body["data"]["refresh_token"].as_str().unwrap();
     assert!(!access_token.is_empty());
-    assert_eq!(refresh_token.len(), 64);
+    assert!(
+        body["data"].get("refresh_token").is_none(),
+        "refresh_token must NOT appear in JSON response"
+    );
+    assert_eq!(body["data"]["user"]["email"], email);
 
-    // 3. Perform Refresh Token Rotation
+    // 3. Perform Refresh Token Rotation (cookie-based, empty request body)
     let refresh_req = harness
         .client
         .post("/api/v1/auth/refresh")
-        .json(&json!({ "refresh_token": refresh_token }));
+        .header(Header::new(
+            "Cookie",
+            format!("refresh_token={}", raw_refresh_token),
+        ));
     let refresh_res = refresh_req.dispatch().await;
     assert_eq!(refresh_res.status(), Status::Ok);
 
-    let refresh_body: serde_json::Value = refresh_res.into_json().await.unwrap();
-    let new_refresh_token = refresh_body["data"]["refresh_token"].as_str().unwrap();
-    assert_ne!(refresh_token, new_refresh_token);
+    let new_refresh_token = {
+        let refresh_set_cookie = refresh_res
+            .headers()
+            .get("Set-Cookie")
+            .find(|h| h.starts_with("refresh_token="))
+            .expect("Rotated Set-Cookie must be returned");
+        let token = refresh_set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("refresh_token=")
+            .unwrap();
+        assert_ne!(&raw_refresh_token, token);
+        token.to_string()
+    };
 
-    // 4. Logout revokes token
+    let refresh_body: serde_json::Value = refresh_res.into_json().await.unwrap();
+    let new_access_token = refresh_body["data"]["access_token"].as_str().unwrap();
+    assert!(!new_access_token.is_empty());
+    assert!(
+        refresh_body["data"].get("refresh_token").is_none(),
+        "refresh_token must NOT appear in refresh JSON response"
+    );
+    assert_eq!(refresh_body["data"]["user"]["email"], email);
+
+    // 4. Logout revokes token and clears cookie
     let logout_req = harness
         .client
         .post("/api/v1/auth/logout")
-        .json(&json!({ "refresh_token": new_refresh_token }));
+        .header(Header::new(
+            "Cookie",
+            format!("refresh_token={}", new_refresh_token),
+        ));
     let logout_res = logout_req.dispatch().await;
     assert_eq!(logout_res.status(), Status::Ok);
+
+    let clear_cookie = logout_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|h| h.starts_with("refresh_token="))
+        .expect("Set-Cookie clearing header must be present");
+    assert!(clear_cookie.contains("Max-Age=0") || clear_cookie.contains("Expires="));
 
     // Reuse revoked refresh token must fail
     let reuse_req = harness
         .client
         .post("/api/v1/auth/refresh")
-        .json(&json!({ "refresh_token": new_refresh_token }));
+        .header(Header::new(
+            "Cookie",
+            format!("refresh_token={}", new_refresh_token),
+        ));
     let reuse_res = reuse_req.dispatch().await;
     assert_eq!(reuse_res.status(), Status::Unauthorized);
 }
@@ -8735,4 +8797,549 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
     assert_eq!(applied_migrations[2].0, 17);
     assert_eq!(applied_migrations[2].1, "contact messages read state");
     assert!(applied_migrations[2].2);
+}
+
+#[tokio::test]
+async fn test_auth_login_sets_refresh_cookie_and_excludes_from_json() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let email = format!("cookie_admin_{}@example.com", uuid::Uuid::new_v4().simple());
+    let password = "SecurePassword123!";
+    let pass_hash = PasswordService::hash_password(password).unwrap();
+
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Cookie Admin', 'admin', TRUE)"
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&email)
+    .bind(pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let res = harness
+        .client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": email,
+            "password": password
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+
+    // 1. Assert Set-Cookie attributes
+    let cookies: Vec<String> = res
+        .headers()
+        .get("Set-Cookie")
+        .map(|s| s.to_string())
+        .collect();
+    let refresh_cookie = cookies
+        .iter()
+        .find(|c| c.starts_with("refresh_token="))
+        .expect("refresh_token cookie must be present in Set-Cookie");
+
+    assert!(
+        refresh_cookie.contains("HttpOnly"),
+        "Cookie must be HttpOnly"
+    );
+    assert!(
+        refresh_cookie.contains("Path=/api/v1/auth"),
+        "Cookie Path must be /api/v1/auth"
+    );
+    assert!(
+        refresh_cookie.contains("SameSite=Lax"),
+        "Cookie SameSite must be Lax"
+    );
+    assert!(
+        refresh_cookie.contains("Max-Age=2592000"),
+        "Cookie Max-Age must align with refresh TTL (2592000s)"
+    );
+
+    // 2. Assert JSON response contract
+    let body: serde_json::Value = res.into_json().await.unwrap();
+    let access_token = body["data"]["access_token"].as_str().unwrap();
+    assert!(!access_token.is_empty());
+    assert_eq!(body["data"]["token_type"], "Bearer");
+    assert_eq!(body["data"]["expires_in"], 900);
+    assert_eq!(body["data"]["user"]["email"], email);
+    assert!(
+        body["data"].get("refresh_token").is_none(),
+        "refresh_token must NEVER appear in JSON response"
+    );
+}
+
+#[tokio::test]
+async fn test_auth_cookie_attributes_production_vs_development() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let email = format!("env_admin_{}@example.com", uuid::Uuid::new_v4().simple());
+    let password = "SecurePassword123!";
+    let pass_hash = PasswordService::hash_password(password).unwrap();
+
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Env Admin', 'admin', TRUE)"
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&email)
+    .bind(pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 1. Production config: Secure=true
+    let mut prod_config = harness.config.clone();
+    prod_config.env = "production".to_string();
+    let prod_rocket = spa_sax_backend::bootstrap::build_rocket(prod_config)
+        .await
+        .unwrap();
+    let prod_client = Client::tracked(prod_rocket).await.unwrap();
+
+    let prod_res = prod_client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": email,
+            "password": password
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(prod_res.status(), Status::Ok);
+    let prod_cookie = prod_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .expect("Production Set-Cookie must exist");
+    assert!(
+        prod_cookie.contains("Secure"),
+        "Production cookie MUST include Secure flag"
+    );
+    assert!(prod_cookie.contains("HttpOnly"));
+    assert!(prod_cookie.contains("SameSite=Lax"));
+    assert!(prod_cookie.contains("Path=/api/v1/auth"));
+
+    // 2. Development config: Secure=false
+    let mut dev_config = harness.config.clone();
+    dev_config.env = "development".to_string();
+    let dev_rocket = spa_sax_backend::bootstrap::build_rocket(dev_config)
+        .await
+        .unwrap();
+    let dev_client = Client::tracked(dev_rocket).await.unwrap();
+
+    let dev_res = dev_client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": email,
+            "password": password
+        }))
+        .dispatch()
+        .await;
+
+    assert_eq!(dev_res.status(), Status::Ok);
+    let dev_cookie = dev_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .expect("Development Set-Cookie must exist");
+    assert!(
+        !dev_cookie.contains("Secure"),
+        "Development cookie must NOT enforce Secure to allow localhost HTTP development"
+    );
+    assert!(dev_cookie.contains("HttpOnly"));
+    assert!(dev_cookie.contains("SameSite=Lax"));
+    assert!(dev_cookie.contains("Path=/api/v1/auth"));
+}
+
+#[tokio::test]
+async fn test_auth_refresh_via_cookie_rotates_and_invalidates_old_token() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let untracked_client = Client::untracked(
+        spa_sax_backend::bootstrap::build_rocket(harness.config.clone())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let email = format!("rotate_{}@example.com", uuid::Uuid::new_v4().simple());
+    let password = "SecurePassword123!";
+    let pass_hash = PasswordService::hash_password(password).unwrap();
+
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Rotate User', 'admin', TRUE)"
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&email)
+    .bind(pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 1. Initial Login
+    let login_res = untracked_client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": email,
+            "password": password
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(login_res.status(), Status::Ok);
+
+    let login_cookie = login_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .unwrap();
+    let initial_refresh_token = login_cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("refresh_token=")
+        .unwrap()
+        .to_string();
+
+    // 2. Perform Refresh with Cookie
+    let refresh_res = untracked_client
+        .post("/api/v1/auth/refresh")
+        .cookie(
+            Cookie::build(("refresh_token", initial_refresh_token.clone()))
+                .path("/api/v1/auth")
+                .build(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(refresh_res.status(), Status::Ok);
+
+    let new_cookie = refresh_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .expect("Rotated refresh cookie must be returned");
+    let rotated_refresh_token = new_cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("refresh_token=")
+        .unwrap()
+        .to_string();
+
+    assert_ne!(
+        initial_refresh_token, rotated_refresh_token,
+        "Refresh token must rotate upon use"
+    );
+
+    let refresh_body: serde_json::Value = refresh_res.into_json().await.unwrap();
+    let access_token = refresh_body["data"]["access_token"].as_str().unwrap();
+    assert!(!access_token.is_empty());
+    assert_eq!(refresh_body["data"]["user"]["email"], email);
+    assert!(
+        refresh_body["data"].get("refresh_token").is_none(),
+        "refresh_token must NOT appear in refresh response JSON"
+    );
+
+    // 3. Old refresh token must be invalidated
+    let reuse_client = Client::untracked(
+        spa_sax_backend::bootstrap::build_rocket(harness.config.clone())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let reuse_res = reuse_client
+        .post("/api/v1/auth/refresh")
+        .cookie(
+            Cookie::build(("refresh_token", initial_refresh_token))
+                .path("/api/v1/auth")
+                .build(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(
+        reuse_res.status(),
+        Status::Unauthorized,
+        "Reusing invalidated refresh token must return 401"
+    );
+
+    // 4. New refresh token can be used once more
+    let second_refresh = reuse_client
+        .post("/api/v1/auth/refresh")
+        .cookie(
+            Cookie::build(("refresh_token", rotated_refresh_token))
+                .path("/api/v1/auth")
+                .build(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(second_refresh.status(), Status::Ok);
+}
+
+#[tokio::test]
+async fn test_auth_refresh_missing_cookie_returns_401() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // Refresh request with NO cookie
+    let res = harness.client.post("/api/v1/auth/refresh").dispatch().await;
+    assert_eq!(res.status(), Status::Unauthorized);
+
+    let body: serde_json::Value = res.into_json().await.unwrap();
+    assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+}
+
+#[tokio::test]
+async fn test_auth_refresh_body_only_rejected_regression() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let untracked_client = Client::untracked(
+        spa_sax_backend::bootstrap::build_rocket(harness.config.clone())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let email = format!("body_only_{}@example.com", uuid::Uuid::new_v4().simple());
+    let password = "SecurePassword123!";
+    let pass_hash = PasswordService::hash_password(password).unwrap();
+
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Body User', 'admin', TRUE)"
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&email)
+    .bind(pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Login to get a valid refresh token string
+    let login_res = untracked_client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": email,
+            "password": password
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(login_res.status(), Status::Ok);
+
+    let login_cookie = login_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .unwrap();
+    let valid_refresh_token = login_cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("refresh_token=")
+        .unwrap();
+
+    // Client sends old Contract B JSON body WITHOUT any Cookie header on untracked client
+    let res = untracked_client
+        .post("/api/v1/auth/refresh")
+        .json(&json!({ "refresh_token": valid_refresh_token }))
+        .dispatch()
+        .await;
+
+    assert_eq!(
+        res.status(),
+        Status::Unauthorized,
+        "Body-only refresh token without cookie must NOT authenticate (proves Contract B removed)"
+    );
+}
+
+#[tokio::test]
+async fn test_auth_logout_clears_cookie_and_revokes_session() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    let email = format!("logout_user_{}@example.com", uuid::Uuid::new_v4().simple());
+    let password = "SecurePassword123!";
+    let pass_hash = PasswordService::hash_password(password).unwrap();
+
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, $3, 'Logout User', 'admin', TRUE)"
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&email)
+    .bind(pass_hash)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 1. Login
+    let login_res = harness
+        .client
+        .post("/api/v1/auth/login")
+        .json(&json!({
+            "email": email,
+            "password": password
+        }))
+        .dispatch()
+        .await;
+    assert_eq!(login_res.status(), Status::Ok);
+
+    let cookie_hdr = login_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .unwrap();
+    let refresh_token = cookie_hdr
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("refresh_token=")
+        .unwrap();
+
+    // 2. Logout with Cookie
+    let logout_res = harness
+        .client
+        .post("/api/v1/auth/logout")
+        .header(Header::new(
+            "Cookie",
+            format!("refresh_token={}", refresh_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(logout_res.status(), Status::Ok);
+
+    // Verify Set-Cookie clears the refresh_token
+    let clear_hdr = logout_res
+        .headers()
+        .get("Set-Cookie")
+        .find(|c| c.starts_with("refresh_token="))
+        .expect("Logout must return Set-Cookie clearing header");
+    assert!(
+        clear_hdr.contains("Max-Age=0") || clear_hdr.contains("Expires="),
+        "Logout cookie must have Max-Age=0 or expired date to clear browser session"
+    );
+
+    // 3. Attempt to refresh with the logged-out token must fail
+    let refresh_res = harness
+        .client
+        .post("/api/v1/auth/refresh")
+        .header(Header::new(
+            "Cookie",
+            format!("refresh_token={}", refresh_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(
+        refresh_res.status(),
+        Status::Unauthorized,
+        "Logged-out refresh token must be revoked and rejected"
+    );
+
+    // 4. Logout without cookie must succeed idempotently
+    let empty_logout_res = harness.client.post("/api/v1/auth/logout").dispatch().await;
+    assert_eq!(
+        empty_logout_res.status(),
+        Status::Ok,
+        "Logout without cookie must succeed idempotently"
+    );
+}
+
+#[tokio::test]
+async fn test_cors_credentials_and_allowlist_enforcement() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+
+    // Create rocket instance with production origins allowlist
+    let mut config = harness.config.clone();
+    config.cors_allowed_origins = vec![
+        "https://enstisax.com".to_string(),
+        "https://www.enstisax.com".to_string(),
+        "http://localhost:5173".to_string(),
+    ];
+    let rocket = spa_sax_backend::bootstrap::build_rocket(config)
+        .await
+        .unwrap();
+    let client = Client::tracked(rocket).await.unwrap();
+
+    // 1. Allowed origin https://enstisax.com on OPTIONS /api/v1/auth/login
+    let preflight_res = client
+        .req(Method::Options, "/api/v1/auth/login")
+        .header(Header::new("Origin", "https://enstisax.com"))
+        .header(Header::new("Access-Control-Request-Method", "POST"))
+        .header(Header::new(
+            "Access-Control-Request-Headers",
+            "Content-Type, Authorization",
+        ))
+        .dispatch()
+        .await;
+
+    assert_eq!(preflight_res.status(), Status::NoContent);
+    assert_eq!(
+        preflight_res
+            .headers()
+            .get_one("Access-Control-Allow-Origin"),
+        Some("https://enstisax.com")
+    );
+    assert_eq!(
+        preflight_res
+            .headers()
+            .get_one("Access-Control-Allow-Credentials"),
+        Some("true")
+    );
+    assert_ne!(
+        preflight_res
+            .headers()
+            .get_one("Access-Control-Allow-Origin"),
+        Some("*"),
+        "Access-Control-Allow-Origin must NEVER be wildcard when credentials are enabled"
+    );
+
+    // 2. Allowed origin on actual POST /api/v1/auth/refresh
+    let refresh_cors_res = client
+        .post("/api/v1/auth/refresh")
+        .header(Header::new("Origin", "https://www.enstisax.com"))
+        .dispatch()
+        .await;
+
+    assert_eq!(
+        refresh_cors_res
+            .headers()
+            .get_one("Access-Control-Allow-Origin"),
+        Some("https://www.enstisax.com")
+    );
+    assert_eq!(
+        refresh_cors_res
+            .headers()
+            .get_one("Access-Control-Allow-Credentials"),
+        Some("true")
+    );
+
+    // 3. Disallowed attacker origin
+    let evil_preflight = client
+        .req(Method::Options, "/api/v1/auth/login")
+        .header(Header::new("Origin", "https://malicious-site.example"))
+        .header(Header::new("Access-Control-Request-Method", "POST"))
+        .dispatch()
+        .await;
+
+    assert_eq!(
+        evil_preflight.status(),
+        Status::Forbidden,
+        "Disallowed origin preflight must be 403 Forbidden"
+    );
+    assert!(
+        evil_preflight
+            .headers()
+            .get_one("Access-Control-Allow-Origin")
+            .is_none(),
+        "Disallowed origin must NOT receive Access-Control-Allow-Origin header"
+    );
+    assert!(
+        evil_preflight
+            .headers()
+            .get_one("Access-Control-Allow-Credentials")
+            .is_none(),
+        "Disallowed origin must NOT receive Access-Control-Allow-Credentials header"
+    );
 }

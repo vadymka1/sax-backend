@@ -60,6 +60,7 @@ impl Fairing for CorsFairing {
                 "Access-Control-Allow-Origin",
                 origin.to_string(),
             ));
+            res.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
             res.set_header(Header::new("Vary", "Origin"));
             res.set_header(Header::new(
                 "Access-Control-Allow-Methods",

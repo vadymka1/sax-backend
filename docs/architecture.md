@@ -49,19 +49,21 @@ sequenceDiagram
     AuthService->>AuthService: Generate Access Token (JWT 15m) & Refresh Token (30d)
     AuthService->>AuthService: Hash Refresh Token (SHA-256)
     AuthService->>DB: INSERT into user_refresh_tokens
-    AuthService-->>API: User DTO + Tokens
-    API-->>Admin: 200 OK { data: { access_token, refresh_token, user } }
+    AuthService-->>API: User DTO + Access Token + Refresh Token
+    API->>API: Set-Cookie: refresh_token=... (HttpOnly, SameSite=Lax, Path=/api/v1/auth)
+    API-->>Admin: 200 OK { data: { access_token, token_type, expires_in, user } }
 
     Note over Admin, API: Access Token Expires
-    Admin->>API: POST /api/v1/auth/refresh { refresh_token }
+    Admin->>API: POST /api/v1/auth/refresh (Cookie: refresh_token)
     API->>AuthService: Rotate Refresh Token
     AuthService->>DB: Find non-revoked active refresh token by hash
     DB-->>AuthService: Token record
     AuthService->>DB: Revoke old refresh token (set revoked_at = NOW)
     AuthService->>AuthService: Issue new Access & Refresh tokens
     AuthService->>DB: INSERT new refresh token hash
-    AuthService-->>API: New Tokens
-    API-->>Admin: 200 OK { data: { access_token, refresh_token } }
+    AuthService-->>API: User DTO + New Tokens
+    API->>API: Set-Cookie: refresh_token=... (Rotated HttpOnly cookie)
+    API-->>Admin: 200 OK { data: { access_token, token_type, expires_in, user } }
 ```
 
 ## 3. Media Upload & Storage Trait Flow

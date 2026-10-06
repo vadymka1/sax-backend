@@ -1,27 +1,60 @@
+use rocket::http::{Cookie, CookieJar, SameSite};
 use rocket::serde::json::Json;
+use rocket::time::Duration;
 use rocket::State;
 use sqlx::PgPool;
 
 use crate::api::guards::AuthenticatedUser;
 use crate::application::dto::{
-    AuthTokensDto, LoginRequest, LogoutRequest, MessageDataDto, RefreshTokenDataDto,
-    RefreshTokenRequest, UserDto,
+    AuthTokensDto, LoginRequest, MessageDataDto, RefreshTokenDataDto, UserDto,
 };
 use crate::application::services::auth_service::AuthService;
 use crate::config::AppConfig;
-use crate::shared::errors::AppResult;
+use crate::shared::errors::{AppError, AppResult};
 use crate::shared::pagination::SingleResponse;
+
+pub const REFRESH_COOKIE_NAME: &str = "refresh_token";
+pub const REFRESH_COOKIE_PATH: &str = "/api/v1/auth";
+
+pub fn build_refresh_cookie(token: &str, ttl_seconds: i64, is_secure: bool) -> Cookie<'static> {
+    Cookie::build((REFRESH_COOKIE_NAME, token.to_string()))
+        .path(REFRESH_COOKIE_PATH)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(is_secure)
+        .max_age(Duration::seconds(ttl_seconds))
+        .build()
+}
+
+pub fn build_clear_refresh_cookie<'a>(is_secure: bool) -> Cookie<'a> {
+    Cookie::build((REFRESH_COOKIE_NAME, ""))
+        .path(REFRESH_COOKIE_PATH)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(is_secure)
+        .max_age(Duration::seconds(0))
+        .build()
+}
+
+pub fn set_refresh_cookie(jar: &CookieJar<'_>, token: &str, ttl_seconds: i64, is_secure: bool) {
+    jar.add(build_refresh_cookie(token, ttl_seconds, is_secure));
+}
+
+pub fn clear_refresh_cookie(jar: &CookieJar<'_>, is_secure: bool) {
+    jar.remove(build_clear_refresh_cookie(is_secure));
+}
 
 /// User login
 ///
-/// Authenticates super admin or admin user using email and password credentials. Returns short-lived access JWT and refresh token in JSON response envelope.
+/// Authenticates super admin or admin user using email and password credentials.
+/// Returns short-lived access JWT in JSON response envelope and sets HttpOnly refresh token cookie.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/login",
     tag = "Auth",
     request_body(content = LoginRequest, description = "Login credentials (email and password)"),
     responses(
-        (status = 200, description = "Authentication successful", body = SingleResponse<AuthTokensDto>),
+        (status = 200, description = "Authentication successful (access token in JSON, refresh token set in HttpOnly cookie)", body = SingleResponse<AuthTokensDto>),
         (status = 422, description = "Validation error", body = ApiErrorResponse),
         (status = 401, description = "Invalid credentials or inactive account", body = ApiErrorResponse),
         (status = 500, description = "Internal server error", body = ApiErrorResponse)
@@ -30,71 +63,90 @@ use crate::shared::pagination::SingleResponse;
 #[rocket::post("/auth/login", data = "<login_req>")]
 pub async fn login(
     login_req: Json<LoginRequest>,
+    jar: &CookieJar<'_>,
     db: &State<PgPool>,
     config: &State<AppConfig>,
 ) -> AppResult<Json<SingleResponse<AuthTokensDto>>> {
     let service = AuthService::new(db.inner(), config.inner());
-    let tokens = service.login(login_req.into_inner()).await?;
+    let (tokens, refresh_token) = service.login(login_req.into_inner()).await?;
+    set_refresh_cookie(
+        jar,
+        &refresh_token,
+        config.jwt_refresh_ttl_seconds,
+        config.is_production(),
+    );
     Ok(Json(SingleResponse { data: tokens }))
 }
 
 /// Refresh access token
 ///
-/// Exchanges a valid refresh token for a new access token and rotated refresh token pair.
+/// Exchanges an active HttpOnly refresh cookie for a new access token and rotated refresh cookie.
+/// Does not accept or require a JSON request body.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/refresh",
     tag = "Auth",
-    request_body(content = RefreshTokenRequest, description = "Active refresh token"),
     responses(
-        (status = 200, description = "Token refreshed successfully", body = SingleResponse<RefreshTokenDataDto>),
-        (status = 422, description = "Validation error", body = ApiErrorResponse),
-        (status = 401, description = "Invalid, expired, or revoked refresh token", body = ApiErrorResponse),
+        (status = 200, description = "Token refreshed successfully (new access token in JSON, rotated refresh token in HttpOnly cookie)", body = SingleResponse<RefreshTokenDataDto>),
+        (status = 401, description = "Missing, invalid, expired, or revoked refresh cookie", body = ApiErrorResponse),
         (status = 500, description = "Internal server error", body = ApiErrorResponse)
     )
 )]
-#[rocket::post("/auth/refresh", data = "<refresh_req>")]
+#[rocket::post("/auth/refresh")]
 pub async fn refresh(
-    refresh_req: Json<RefreshTokenRequest>,
+    jar: &CookieJar<'_>,
     db: &State<PgPool>,
     config: &State<AppConfig>,
 ) -> AppResult<Json<SingleResponse<RefreshTokenDataDto>>> {
-    let service = AuthService::new(db.inner(), config.inner());
-    let (access_token, refresh_token) = service.refresh(refresh_req.into_inner()).await?;
+    let cookie = jar.get(REFRESH_COOKIE_NAME).ok_or(AppError::Unauthorized)?;
 
-    Ok(Json(SingleResponse {
-        data: RefreshTokenDataDto {
-            access_token,
-            refresh_token,
-            token_type: "Bearer".to_string(),
-            expires_in: config.jwt_access_ttl_seconds,
-        },
-    }))
+    let token = cookie.value().trim();
+    if token.is_empty() {
+        return Err(AppError::Unauthorized);
+    }
+
+    let service = AuthService::new(db.inner(), config.inner());
+    let (dto, new_refresh) = service.refresh(token).await?;
+
+    set_refresh_cookie(
+        jar,
+        &new_refresh,
+        config.jwt_refresh_ttl_seconds,
+        config.is_production(),
+    );
+
+    Ok(Json(SingleResponse { data: dto }))
 }
 
 /// User logout
 ///
-/// Revokes the provided refresh token and invalidates active session.
+/// Revokes active session associated with HttpOnly refresh cookie and clears the cookie.
+/// Does not require a JSON request body; handles missing cookie safely and idempotently.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/logout",
     tag = "Auth",
-    request_body(content = LogoutRequest, description = "Refresh token to revoke"),
     responses(
-        (status = 200, description = "Successfully logged out", body = SingleResponse<MessageDataDto>),
-        (status = 422, description = "Validation error", body = ApiErrorResponse),
-        (status = 401, description = "Invalid or revoked refresh token", body = ApiErrorResponse),
+        (status = 200, description = "Successfully logged out and session cleared", body = SingleResponse<MessageDataDto>),
         (status = 500, description = "Internal server error", body = ApiErrorResponse)
     )
 )]
-#[rocket::post("/auth/logout", data = "<logout_req>")]
+#[rocket::post("/auth/logout")]
 pub async fn logout(
-    logout_req: Json<LogoutRequest>,
+    jar: &CookieJar<'_>,
     db: &State<PgPool>,
     config: &State<AppConfig>,
 ) -> AppResult<Json<SingleResponse<MessageDataDto>>> {
-    let service = AuthService::new(db.inner(), config.inner());
-    service.logout(logout_req.into_inner()).await?;
+    if let Some(cookie) = jar.get(REFRESH_COOKIE_NAME) {
+        let token = cookie.value().trim();
+        if !token.is_empty() {
+            let service = AuthService::new(db.inner(), config.inner());
+            let _ = service.logout(token).await;
+        }
+    }
+
+    clear_refresh_cookie(jar, config.is_production());
+
     Ok(Json(SingleResponse {
         data: MessageDataDto {
             message: "Successfully logged out".to_string(),

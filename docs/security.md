@@ -2,8 +2,8 @@
 
 ## 1. Authentication & Token Lifecycle
 - **Password Hashing**: Argon2id via `argon2` crate using recommended parameters (Memory 19MiB, 2 iterations, 1 parallelism degree).
-- **Access Tokens**: Short-lived (15 minutes default) HMAC-SHA256 JWTs signed with `JWT_ACCESS_SECRET`. Contain `sub` (User UUID), `role`, `exp`, `iat`, `nbf`, `jti`.
-- **Refresh Tokens**: Long-lived (30 days default) cryptographically random UUID strings. Stored in DB exclusively as SHA-256 hashes (`user_refresh_tokens`). On `/auth/refresh`, old token is marked `revoked_at` and a new token pair is issued (token rotation).
+- **Access Tokens**: Short-lived (15 minutes default) HMAC-SHA256 JWTs signed with `JWT_ACCESS_SECRET`. Contain `sub` (User UUID), `role`, `exp`, `iat`, `nbf`, `jti`. Stored strictly in frontend memory.
+- **Refresh Tokens**: Long-lived (30 days default) cryptographically random 256-bit strings. Stored in DB exclusively as SHA-256 hashes (`user_refresh_tokens`). Transmitted exclusively as a Secure HttpOnly cookie (`refresh_token`) scoped to `/api/v1/auth`. On `/auth/refresh`, old token is marked `revoked_at` and rotated with a new cookie and new access token.
 
 ## 2. Authorization & RBAC Matrix
 
@@ -11,6 +11,7 @@
 | :--- | :---: | :---: | :---: | :---: |
 | `POST /api/v1/auth/login` | Yes | Yes | Yes | Yes |
 | `POST /api/v1/auth/refresh` | Yes | Yes | Yes | Yes |
+| `POST /api/v1/auth/logout` | Yes | Yes | Yes | Yes |
 | `GET /api/v1/auth/me` | Yes | Yes | Yes | No |
 | `GET /api/v1/admin/users` | Yes | Yes | No | No |
 | `POST /api/v1/admin/users` | Yes | Yes (editor only) | No | No |

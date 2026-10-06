@@ -1150,4 +1150,218 @@ mod tests {
             "BlockAttachedMediaDto schema must NOT declare legacy 'type' property"
         );
     }
+
+    #[test]
+    fn test_auth_cookie_builder_attributes() {
+        use spa_sax_backend::api::routes::auth::{
+            build_clear_refresh_cookie, build_refresh_cookie, REFRESH_COOKIE_NAME,
+            REFRESH_COOKIE_PATH,
+        };
+
+        // Production cookie: Secure=true
+        let prod_cookie = build_refresh_cookie("secret_token_123", 2592000, true);
+        assert_eq!(prod_cookie.name(), REFRESH_COOKIE_NAME);
+        assert_eq!(prod_cookie.value(), "secret_token_123");
+        assert_eq!(prod_cookie.path(), Some(REFRESH_COOKIE_PATH));
+        assert_eq!(prod_cookie.http_only(), Some(true));
+        assert_eq!(prod_cookie.same_site(), Some(rocket::http::SameSite::Lax));
+        assert_eq!(prod_cookie.secure(), Some(true));
+        assert_eq!(
+            prod_cookie.max_age(),
+            Some(rocket::time::Duration::seconds(2592000))
+        );
+
+        // Development cookie: Secure=false
+        let dev_cookie = build_refresh_cookie("secret_token_123", 2592000, false);
+        assert_eq!(dev_cookie.secure(), Some(false));
+        assert_eq!(dev_cookie.http_only(), Some(true));
+        assert_eq!(dev_cookie.same_site(), Some(rocket::http::SameSite::Lax));
+        assert_eq!(dev_cookie.path(), Some(REFRESH_COOKIE_PATH));
+
+        // Clear cookie
+        let clear_cookie = build_clear_refresh_cookie(true);
+        assert_eq!(clear_cookie.name(), REFRESH_COOKIE_NAME);
+        assert_eq!(clear_cookie.value(), "");
+        assert_eq!(clear_cookie.path(), Some(REFRESH_COOKIE_PATH));
+        assert_eq!(clear_cookie.http_only(), Some(true));
+        assert_eq!(clear_cookie.same_site(), Some(rocket::http::SameSite::Lax));
+        assert_eq!(
+            clear_cookie.max_age(),
+            Some(rocket::time::Duration::seconds(0))
+        );
+    }
+
+    #[test]
+    fn test_auth_openapi_schemas_contract_c_regression() {
+        use spa_sax_backend::bootstrap::ApiDoc;
+        use utoipa::OpenApi;
+
+        let openapi = ApiDoc::openapi();
+        let components = openapi.components.expect("Components must exist");
+
+        // AuthTokensDto must NOT expose refresh_token
+        let auth_tokens_schema = components
+            .schemas
+            .get("AuthTokensDto")
+            .expect("AuthTokensDto schema must exist");
+        let val = serde_json::to_value(auth_tokens_schema).unwrap();
+        let props = val.get("properties").expect("Properties must exist");
+        assert!(props.get("access_token").is_some());
+        assert!(props.get("token_type").is_some());
+        assert!(props.get("expires_in").is_some());
+        assert!(props.get("user").is_some());
+        assert!(
+            props.get("refresh_token").is_none(),
+            "AuthTokensDto must NOT expose refresh_token in OpenAPI schema"
+        );
+
+        // RefreshTokenDataDto must NOT expose refresh_token, and must expose user
+        let refresh_data_schema = components
+            .schemas
+            .get("RefreshTokenDataDto")
+            .expect("RefreshTokenDataDto schema must exist");
+        let refresh_val = serde_json::to_value(refresh_data_schema).unwrap();
+        let refresh_props = refresh_val
+            .get("properties")
+            .expect("Properties must exist");
+        assert!(refresh_props.get("access_token").is_some());
+        assert!(refresh_props.get("user").is_some());
+        assert!(
+            refresh_props.get("refresh_token").is_none(),
+            "RefreshTokenDataDto must NOT expose refresh_token in OpenAPI schema"
+        );
+
+        // Obsolete request bodies must NOT be in components
+        assert!(
+            !components.schemas.contains_key("RefreshTokenRequest"),
+            "RefreshTokenRequest must be removed from OpenAPI schemas"
+        );
+        assert!(
+            !components.schemas.contains_key("LogoutRequest"),
+            "LogoutRequest must be removed from OpenAPI schemas"
+        );
+    }
+
+    #[test]
+    fn test_postman_artifacts_contract_c_sync() {
+        let env_content = std::fs::read_to_string("tests/postman_environment.json")
+            .expect("Must read tests/postman_environment.json");
+        let env_json: serde_json::Value = serde_json::from_str(&env_content)
+            .expect("tests/postman_environment.json must be valid JSON");
+
+        let env_values = env_json
+            .get("values")
+            .and_then(|v| v.as_array())
+            .expect("Environment must contain values array");
+
+        let has_refresh_var = env_values.iter().any(|item| {
+            item.get("key")
+                .and_then(|k| k.as_str())
+                .map(|k| k.to_lowercase().contains("refreshtoken"))
+                .unwrap_or(false)
+        });
+        assert!(
+            !has_refresh_var,
+            "tests/postman_environment.json must NOT contain any refreshToken variable"
+        );
+
+        let has_access_var = env_values.iter().any(|item| {
+            item.get("key")
+                .and_then(|k| k.as_str())
+                .map(|k| k == "accessToken")
+                .unwrap_or(false)
+        });
+        assert!(
+            has_access_var,
+            "tests/postman_environment.json must retain accessToken variable"
+        );
+
+        let coll_content = std::fs::read_to_string("tests/postman_apidog_collection.json")
+            .expect("Must read tests/postman_apidog_collection.json");
+        assert!(
+            !coll_content.contains("{{refreshToken}}"),
+            "Postman collection must not reference {{{{refreshToken}}}}"
+        );
+
+        let coll_json: serde_json::Value = serde_json::from_str(&coll_content)
+            .expect("tests/postman_apidog_collection.json must be valid JSON");
+
+        if let Some(vars) = coll_json.get("variable").and_then(|v| v.as_array()) {
+            let has_coll_refresh = vars.iter().any(|v| {
+                v.get("key")
+                    .and_then(|k| k.as_str())
+                    .map(|k| k.to_lowercase().contains("refreshtoken"))
+                    .unwrap_or(false)
+            });
+            assert!(
+                !has_coll_refresh,
+                "Postman collection variables must not contain refreshToken"
+            );
+        }
+
+        // Verify Authentication items
+        let items = coll_json
+            .get("item")
+            .and_then(|i| i.as_array())
+            .expect("Collection must have top-level items");
+
+        let auth_folder = items
+            .iter()
+            .find(|it| {
+                it.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.contains("Authentication"))
+                    .unwrap_or(false)
+            })
+            .expect("Must have Authentication item folder");
+
+        let auth_items = auth_folder
+            .get("item")
+            .and_then(|i| i.as_array())
+            .expect("Authentication folder must have items");
+
+        // Verify refresh request has empty body
+        let refresh_item = auth_items
+            .iter()
+            .find(|it| {
+                it.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.contains("Refresh Token"))
+                    .unwrap_or(false)
+            })
+            .expect("Must have Refresh Token item");
+
+        let refresh_raw_body = refresh_item
+            .get("request")
+            .and_then(|r| r.get("body"))
+            .and_then(|b| b.get("raw"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        assert!(
+            refresh_raw_body.trim().is_empty(),
+            "Refresh request body in Postman collection must be empty"
+        );
+
+        // Verify logout item exists with empty body
+        let logout_item = auth_items
+            .iter()
+            .find(|it| {
+                it.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.contains("Logout"))
+                    .unwrap_or(false)
+            })
+            .expect("Must have Logout item");
+
+        let logout_raw_body = logout_item
+            .get("request")
+            .and_then(|r| r.get("body"))
+            .and_then(|b| b.get("raw"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        assert!(
+            logout_raw_body.trim().is_empty(),
+            "Logout request body in Postman collection must be empty"
+        );
+    }
 }

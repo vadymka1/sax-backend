@@ -35,7 +35,6 @@ pub struct UserDto {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuthTokensDto {
     pub access_token: String,
-    pub refresh_token: String,
     #[schema(example = "Bearer")]
     pub token_type: String,
     #[schema(example = 900)]
@@ -43,15 +42,19 @@ pub struct AuthTokensDto {
     pub user: UserDto,
 }
 
+pub type LoginResponseDto = AuthTokensDto;
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RefreshTokenDataDto {
     pub access_token: String,
-    pub refresh_token: String,
     #[schema(example = "Bearer")]
     pub token_type: String,
     #[schema(example = 900)]
     pub expires_in: i64,
+    pub user: UserDto,
 }
+
+pub type RefreshResponseDto = RefreshTokenDataDto;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MessageDataDto {
@@ -65,18 +68,6 @@ pub struct LoginRequest {
     pub email: String,
     #[schema(example = "secretpassword")]
     pub password: String,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct RefreshTokenRequest {
-    #[schema(example = "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678")]
-    pub refresh_token: String,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct LogoutRequest {
-    #[schema(example = "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678")]
-    pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

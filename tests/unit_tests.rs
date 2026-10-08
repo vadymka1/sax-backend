@@ -1364,4 +1364,126 @@ mod tests {
             "Logout request body in Postman collection must be empty"
         );
     }
+
+    #[test]
+    fn test_page_appearance_enums_and_defaults() {
+        use spa_sax_backend::application::dto::UpdatePageAppearanceRequest;
+        use spa_sax_backend::domain::pages::{
+            BackgroundPosition, BackgroundSize, PageAppearanceSettings,
+        };
+        use uuid::Uuid;
+
+        // Verify BackgroundPosition
+        assert_eq!(BackgroundPosition::default(), BackgroundPosition::Center);
+        assert_eq!(BackgroundPosition::Center.as_str(), "center");
+        assert_eq!(BackgroundPosition::Top.as_str(), "top");
+        assert_eq!(BackgroundPosition::Bottom.as_str(), "bottom");
+        assert_eq!(
+            BackgroundPosition::parse("center"),
+            Some(BackgroundPosition::Center)
+        );
+        assert_eq!(
+            BackgroundPosition::parse("top"),
+            Some(BackgroundPosition::Top)
+        );
+        assert_eq!(
+            BackgroundPosition::parse("bottom"),
+            Some(BackgroundPosition::Bottom)
+        );
+        assert_eq!(BackgroundPosition::parse("invalid"), None);
+
+        // Verify BackgroundSize
+        assert_eq!(BackgroundSize::default(), BackgroundSize::Cover);
+        assert_eq!(BackgroundSize::Cover.as_str(), "cover");
+        assert_eq!(BackgroundSize::Contain.as_str(), "contain");
+        assert_eq!(BackgroundSize::parse("cover"), Some(BackgroundSize::Cover));
+        assert_eq!(
+            BackgroundSize::parse("contain"),
+            Some(BackgroundSize::Contain)
+        );
+        assert_eq!(BackgroundSize::parse("invalid"), None);
+
+        // Verify PageAppearanceSettings defaults
+        let def = PageAppearanceSettings::default();
+        assert_eq!(def.overlay_opacity, 0.35);
+        assert_eq!(def.background_position, BackgroundPosition::Center);
+        assert_eq!(def.background_size, BackgroundSize::Cover);
+        assert_eq!(def.background_media_id, None);
+
+        // Verify UpdatePageAppearanceRequest partial serde
+        // 1. Omitted fields
+        let req1: UpdatePageAppearanceRequest = serde_json::from_str("{}").unwrap();
+        assert!(req1.background_media_id.is_none());
+        assert!(req1.overlay_opacity.is_none());
+        assert!(req1.background_position.is_none());
+        assert!(req1.background_size.is_none());
+
+        // 2. Explicit null background_media_id (detach image)
+        let req2: UpdatePageAppearanceRequest =
+            serde_json::from_str(r#"{"background_media_id": null}"#).unwrap();
+        assert_eq!(req2.background_media_id, Some(None));
+
+        // 3. Explicit media UUID assignment
+        let test_uuid = Uuid::new_v4();
+        let json_with_id = format!(
+            r#"{{"background_media_id": "{test_uuid}", "overlay_opacity": 0.8, "background_position": "top", "background_size": "contain"}}"#
+        );
+        let req3: UpdatePageAppearanceRequest = serde_json::from_str(&json_with_id).unwrap();
+        assert_eq!(req3.background_media_id, Some(Some(test_uuid)));
+        assert_eq!(req3.overlay_opacity, Some(0.8));
+        assert_eq!(req3.background_position, Some(BackgroundPosition::Top));
+        assert_eq!(req3.background_size, Some(BackgroundSize::Contain));
+    }
+
+    #[test]
+    fn test_page_appearance_openapi_schemas_regression() {
+        use spa_sax_backend::bootstrap::ApiDoc;
+        use utoipa::OpenApi;
+
+        let openapi = ApiDoc::openapi();
+        let components = openapi
+            .components
+            .expect("OpenAPI components must be present");
+        let schemas = &components.schemas;
+
+        // Verify required schemas exist
+        let required_schemas = [
+            "AdminPageAppearanceDto",
+            "PublicPageAppearanceDto",
+            "UpdatePageAppearanceRequest",
+            "BackgroundPosition",
+            "BackgroundSize",
+            "PublicPageResponse",
+        ];
+
+        for schema_name in required_schemas {
+            assert!(
+                schemas.contains_key(schema_name),
+                "OpenAPI schemas must contain {schema_name}"
+            );
+        }
+
+        // Verify PublicPageResponse schema includes "appearance"
+        let public_page_schema = schemas.get("PublicPageResponse").unwrap();
+        let public_page_json = serde_json::to_string(public_page_schema).unwrap();
+        assert!(
+            public_page_json.contains("appearance"),
+            "PublicPageResponse schema must contain 'appearance' property"
+        );
+
+        // Verify AdminPageAppearanceDto schema includes background_media, overlay_opacity, background_position, background_size
+        let admin_dto_schema = schemas.get("AdminPageAppearanceDto").unwrap();
+        let admin_dto_json = serde_json::to_string(admin_dto_schema).unwrap();
+        assert!(admin_dto_json.contains("background_media"));
+        assert!(admin_dto_json.contains("overlay_opacity"));
+        assert!(admin_dto_json.contains("background_position"));
+        assert!(admin_dto_json.contains("background_size"));
+
+        // Verify paths include /api/v1/admin/page-appearance
+        let paths = &openapi.paths.paths;
+        assert!(
+            paths.contains_key("/api/v1/admin/page-appearance"),
+            "OpenAPI paths must contain /api/v1/admin/page-appearance"
+        );
+    }
 }

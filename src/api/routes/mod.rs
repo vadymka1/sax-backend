@@ -4,6 +4,7 @@ pub mod content_blocks;
 pub mod health;
 pub mod media;
 pub mod options;
+pub mod page_appearance;
 pub mod public;
 pub mod spa_sections;
 pub mod testimonials;

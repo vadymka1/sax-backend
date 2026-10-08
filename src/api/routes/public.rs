@@ -18,7 +18,7 @@ use crate::shared::pagination::SingleResponse;
 /// Get aggregated public SPA page
 ///
 /// Returns home page details, visible SPA sections, ordered content blocks, and their associated media in a single public response envelope.
-/// Supports optional locale query parameter ('en' or 'de', defaults to 'en'). Returns localized content with English fallback.
+/// Supports optional locale query parameter ('en' or 'de', defaults to 'en'). Returns localized content and navigation labels with deterministic fallback (requested nav -> English nav -> requested name -> English name).
 #[utoipa::path(
     get,
     path = "/api/v1/public/page",

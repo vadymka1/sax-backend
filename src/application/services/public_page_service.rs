@@ -49,6 +49,8 @@ impl PublicPageService {
             sort_order: i32,
             req_name: Option<String>,
             en_name: Option<String>,
+            req_nav: Option<String>,
+            en_nav: Option<String>,
         }
 
         #[derive(sqlx::FromRow)]
@@ -103,7 +105,9 @@ impl PublicPageService {
                 s.navigation_label,
                 s.sort_order,
                 st_req.name AS req_name,
-                st_en.name AS en_name
+                st_en.name AS en_name,
+                st_req.navigation_label AS req_nav,
+                st_en.navigation_label AS en_nav
             FROM spa_sections s
             LEFT JOIN spa_section_translations st_req
                 ON st_req.spa_section_id = s.id AND st_req.locale = $2
@@ -126,33 +130,63 @@ impl PublicPageService {
         for (idx, sec_row) in section_rows.into_iter().enumerate() {
             section_index_map.insert(sec_row.id, idx);
 
-            let effective_name = if let Some(ref name) = sec_row.req_name {
-                if !name.trim().is_empty() {
-                    name.clone()
-                } else if let Some(ref en) = sec_row.en_name {
-                    if !en.trim().is_empty() {
-                        en.clone()
+            let effective_name = sec_row
+                .req_name
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    sec_row
+                        .en_name
+                        .as_ref()
+                        .map(|v| v.trim())
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or(sec_row.title.as_str())
+                .to_string();
+
+            let effective_nav = sec_row
+                .req_nav
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .or_else(|| {
+                    sec_row
+                        .en_nav
+                        .as_ref()
+                        .map(|v| v.trim())
+                        .filter(|v| !v.is_empty())
+                })
+                .or_else(|| {
+                    sec_row
+                        .req_name
+                        .as_ref()
+                        .map(|v| v.trim())
+                        .filter(|v| !v.is_empty())
+                })
+                .or_else(|| {
+                    sec_row
+                        .en_name
+                        .as_ref()
+                        .map(|v| v.trim())
+                        .filter(|v| !v.is_empty())
+                })
+                .or_else(|| {
+                    let trimmed = sec_row.navigation_label.trim();
+                    if !trimmed.is_empty() {
+                        Some(trimmed)
                     } else {
-                        sec_row.title.clone()
+                        None
                     }
-                } else {
-                    sec_row.title.clone()
-                }
-            } else if let Some(ref en) = sec_row.en_name {
-                if !en.trim().is_empty() {
-                    en.clone()
-                } else {
-                    sec_row.title.clone()
-                }
-            } else {
-                sec_row.title.clone()
-            };
+                })
+                .unwrap_or(sec_row.title.as_str())
+                .to_string();
 
             sections.push(PublicSpaSectionDto {
                 id: sec_row.id,
                 key: sec_row.key,
-                title: effective_name.clone(),
-                navigation_label: effective_name,
+                title: effective_name,
+                navigation_label: effective_nav,
                 sort_order: sec_row.sort_order,
                 blocks: Vec::new(),
             });

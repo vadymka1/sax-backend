@@ -6,11 +6,12 @@ use argon2::PasswordHasher;
 use uuid::Uuid;
 
 use spa_sax_backend::application::dto::{
-    AdminContactMessageDto, AdminContentBlockDto, AdminMediaDto, AdminSpaSectionDto,
-    PublicMediaDto, PublicPageResponse, UserDto,
+    AdminContactMessageDto, AdminContentBlockDto, AdminMediaDto, AdminPageAppearanceDto,
+    AdminSpaSectionDto, PublicMediaDto, PublicPageResponse, UserDto,
 };
+use spa_sax_backend::domain::pages::{BackgroundPosition, BackgroundSize};
 use spa_sax_backend::domain::users::Role;
-use spa_sax_backend::infrastructure::auth::PasswordService;
+use spa_sax_backend::infrastructure::auth::{PasswordService, TokenService};
 use spa_sax_backend::shared::pagination::SingleResponse;
 
 mod common;
@@ -8782,15 +8783,15 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
         migrate_res.err()
     );
 
-    // Verify 0015, 0016, 0017, 0018, and 0019 are recorded as successfully applied in _sqlx_migrations
+    // Verify 0015, 0016, 0017, 0018, 0019, and 0020 are recorded as successfully applied in _sqlx_migrations
     let applied_migrations: Vec<(i64, String, bool)> = sqlx::query_as(
-        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18, 19) ORDER BY version ASC",
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18, 19, 20) ORDER BY version ASC",
     )
     .fetch_all(&harness.pool)
     .await
     .unwrap();
 
-    assert_eq!(applied_migrations.len(), 5);
+    assert_eq!(applied_migrations.len(), 6);
     assert_eq!(applied_migrations[0].0, 15);
     assert_eq!(
         applied_migrations[0].1,
@@ -8816,6 +8817,10 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
     assert_eq!(applied_migrations[4].0, 19);
     assert_eq!(applied_migrations[4].1, "multilingual navigation labels");
     assert!(applied_migrations[4].2);
+
+    assert_eq!(applied_migrations[5].0, 20);
+    assert_eq!(applied_migrations[5].1, "page appearance settings");
+    assert!(applied_migrations[5].2);
 }
 
 #[tokio::test]
@@ -10921,4 +10926,811 @@ async fn test_multilingual_v1_2_public_query_count_bounded() {
             "All sections must have non-empty localized navigation label"
         );
     }
+}
+
+// =========================================================================
+// BACKEND PAGE APPEARANCE V1 TESTS
+// =========================================================================
+
+async fn reset_page_appearance_to_defaults(pool: &sqlx::PgPool) {
+    let home_id: (Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO page_appearance_settings (page_id, background_media_id, overlay_opacity, background_position, background_size, updated_at)
+        VALUES ($1, NULL, 0.35, 'center', 'cover', CURRENT_TIMESTAMP)
+        ON CONFLICT (page_id) DO UPDATE SET
+            background_media_id = NULL,
+            overlay_opacity = 0.35,
+            background_position = 'center',
+            background_size = 'cover',
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(home_id.0)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn upload_appearance_test_image(harness: &TestHarness, admin_token: &str) -> (Uuid, String) {
+    let boundary = "---------------------------974767299852498929531610575";
+    let png_bytes: Vec<u8> = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"appearance_bg.png\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    body.extend_from_slice(&png_bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/media/upload")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        ))
+        .body(body)
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+    let dto: SingleResponse<AdminMediaDto> = res.into_json().await.unwrap();
+    match dto.data {
+        AdminMediaDto::Image { id, url, .. } => (id, url),
+        _ => panic!("Expected AdminMediaDto::Image"),
+    }
+}
+
+async fn upload_appearance_test_video(harness: &TestHarness, admin_token: &str) -> Uuid {
+    let boundary = "---------------------------974767299852498929531610575";
+    let mp4_bytes: Vec<u8> = vec![
+        0x00, 0x00, 0x00, 0x1C, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02,
+        0x00, 0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32, 0x61, 0x76, 0x63, 0x31,
+    ];
+
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"appearance_vid.mp4\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: video/mp4\r\n\r\n");
+    body.extend_from_slice(&mp4_bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/media/upload")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        ))
+        .body(body)
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+    let dto: SingleResponse<AdminMediaDto> = res.into_json().await.unwrap();
+    match dto.data {
+        AdminMediaDto::Video { id, .. } => id,
+        _ => panic!("Expected AdminMediaDto::Video"),
+    }
+}
+
+async fn register_appearance_test_youtube(harness: &TestHarness, admin_token: &str) -> Uuid {
+    let res = harness
+        .client
+        .post("/api/v1/admin/media/youtube")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }).to_string())
+        .dispatch()
+        .await;
+
+    assert_eq!(res.status(), Status::Ok);
+    let dto: SingleResponse<AdminMediaDto> = res.into_json().await.unwrap();
+    match dto.data {
+        AdminMediaDto::Youtube { id, .. } => id,
+        _ => panic!("Expected AdminMediaDto::Youtube"),
+    }
+}
+
+#[tokio::test]
+async fn test_page_appearance_defaults_admin_and_public() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Admin GET /api/v1/admin/page-appearance returns default settings
+    let admin_res = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(admin_res.status(), Status::Ok);
+    let admin_dto: SingleResponse<AdminPageAppearanceDto> = admin_res.into_json().await.unwrap();
+    assert!(admin_dto.data.background_media.is_none());
+    assert_eq!(admin_dto.data.overlay_opacity, 0.35);
+    assert_eq!(
+        admin_dto.data.background_position,
+        BackgroundPosition::Center
+    );
+    assert_eq!(admin_dto.data.background_size, BackgroundSize::Cover);
+
+    // 2. Alias GET /api/v1/admin/pages/home/appearance returns identical settings
+    let alias_res = harness
+        .client
+        .get("/api/v1/admin/pages/home/appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(alias_res.status(), Status::Ok);
+    let alias_dto: SingleResponse<AdminPageAppearanceDto> = alias_res.into_json().await.unwrap();
+    assert!(alias_dto.data.background_media.is_none());
+    assert_eq!(alias_dto.data.overlay_opacity, 0.35);
+
+    // 3. Public GET /api/v1/public/page returns matching default appearance object
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res.status(), Status::Ok);
+    let pub_page: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+    assert!(pub_page.data.appearance.background_media.is_none());
+    assert_eq!(pub_page.data.appearance.overlay_opacity, 0.35);
+    assert_eq!(
+        pub_page.data.appearance.background_position,
+        BackgroundPosition::Center
+    );
+    assert_eq!(
+        pub_page.data.appearance.background_size,
+        BackgroundSize::Cover
+    );
+}
+
+#[tokio::test]
+async fn test_page_appearance_assign_image_and_multilingual_consistency() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, img_url) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // 1. Assign image via PATCH /api/v1/admin/page-appearance
+    let patch_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch_res.status(), Status::Ok);
+    let patch_dto: SingleResponse<AdminPageAppearanceDto> = patch_res.into_json().await.unwrap();
+    match &patch_dto.data.background_media {
+        Some(AdminMediaDto::Image { id, url, .. }) => {
+            assert_eq!(*id, img_id);
+            assert_eq!(*url, img_url);
+        }
+        _ => panic!("Expected AdminMediaDto::Image"),
+    }
+
+    // 2. Public GET /api/v1/public/page?locale=en
+    let pub_en_res = harness
+        .client
+        .get("/api/v1/public/page?locale=en")
+        .dispatch()
+        .await;
+    assert_eq!(pub_en_res.status(), Status::Ok);
+    let pub_en: SingleResponse<PublicPageResponse> = pub_en_res.into_json().await.unwrap();
+    match &pub_en.data.appearance.background_media {
+        Some(PublicMediaDto::Image { id, url, .. }) => {
+            assert_eq!(*id, img_id);
+            assert_eq!(*url, img_url);
+        }
+        _ => panic!("Expected PublicMediaDto::Image for public EN page"),
+    }
+
+    // 3. Public GET /api/v1/public/page?locale=de returns IDENTICAL appearance
+    let pub_de_res = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(pub_de_res.status(), Status::Ok);
+    let pub_de: SingleResponse<PublicPageResponse> = pub_de_res.into_json().await.unwrap();
+    match &pub_de.data.appearance.background_media {
+        Some(PublicMediaDto::Image { id, url, .. }) => {
+            assert_eq!(*id, img_id);
+            assert_eq!(*url, img_url);
+        }
+        _ => panic!("Expected PublicMediaDto::Image for public DE page"),
+    }
+    assert_eq!(
+        pub_en.data.appearance.overlay_opacity,
+        pub_de.data.appearance.overlay_opacity
+    );
+    assert_eq!(
+        pub_en.data.appearance.background_position,
+        pub_de.data.appearance.background_position
+    );
+    assert_eq!(
+        pub_en.data.appearance.background_size,
+        pub_de.data.appearance.background_size
+    );
+}
+
+#[tokio::test]
+async fn test_page_appearance_rejects_video_and_youtube() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let vid_id = upload_appearance_test_video(&harness, admin_token).await;
+    let yt_id = register_appearance_test_youtube(&harness, admin_token).await;
+
+    // 1. Try assigning video as background -> must fail with 422
+    let vid_patch = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": vid_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(vid_patch.status(), Status::UnprocessableEntity);
+
+    // 2. Try assigning youtube as background -> must fail with 422
+    let yt_patch = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": yt_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(yt_patch.status(), Status::UnprocessableEntity);
+
+    // 3. Verify settings were not modified
+    let check_res = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    let check_dto: SingleResponse<AdminPageAppearanceDto> = check_res.into_json().await.unwrap();
+    assert!(check_dto.data.background_media.is_none());
+}
+
+#[tokio::test]
+async fn test_page_appearance_unknown_media_and_transactionality() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let nonexistent_id = Uuid::new_v4();
+
+    // PATCH with nonexistent media_id and new overlay_opacity
+    let res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(
+            json!({
+                "background_media_id": nonexistent_id,
+                "overlay_opacity": 0.8
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::NotFound);
+
+    // Verify opacity was NOT updated to 0.8 (atomic rollback)
+    let check_res = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    let check_dto: SingleResponse<AdminPageAppearanceDto> = check_res.into_json().await.unwrap();
+    assert_eq!(check_dto.data.overlay_opacity, 0.35);
+    assert!(check_dto.data.background_media.is_none());
+}
+
+#[tokio::test]
+async fn test_page_appearance_remove_background_detaches_media() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // 1. Assign image
+    let assign_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(assign_res.status(), Status::Ok);
+
+    // 2. Remove background with explicit null
+    let remove_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": null }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(remove_res.status(), Status::Ok);
+    let remove_dto: SingleResponse<AdminPageAppearanceDto> = remove_res.into_json().await.unwrap();
+    assert!(remove_dto.data.background_media.is_none());
+
+    // 3. Verify underlying media asset still exists in media_assets (not deleted)
+    let media_exists: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM media_assets WHERE id = $1 AND deleted_at IS NULL")
+            .bind(img_id)
+            .fetch_optional(&harness.pool)
+            .await
+            .unwrap();
+    assert!(
+        media_exists.is_some(),
+        "Underlying media asset must NOT be deleted when detached"
+    );
+}
+
+#[tokio::test]
+async fn test_page_appearance_opacity_validation_boundaries() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Valid lower bound 0.0
+    let res0 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": 0.0 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(res0.status(), Status::Ok);
+    let dto0: SingleResponse<AdminPageAppearanceDto> = res0.into_json().await.unwrap();
+    assert_eq!(dto0.data.overlay_opacity, 0.0);
+
+    // 2. Valid upper bound 1.0
+    let res1 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": 1.0 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(res1.status(), Status::Ok);
+    let dto1: SingleResponse<AdminPageAppearanceDto> = res1.into_json().await.unwrap();
+    assert_eq!(dto1.data.overlay_opacity, 1.0);
+
+    // 3. Invalid negative -0.01 -> 422
+    let res_neg = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": -0.01 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(res_neg.status(), Status::UnprocessableEntity);
+
+    // 4. Invalid above 1.0 -> 1.01 -> 422
+    let res_over = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": 1.01 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(res_over.status(), Status::UnprocessableEntity);
+}
+
+#[tokio::test]
+async fn test_page_appearance_position_and_size_enums() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Valid position: top, bottom, center
+    for pos in ["top", "bottom", "center"] {
+        let res = harness
+            .client
+            .patch("/api/v1/admin/page-appearance")
+            .header(Header::new(
+                "Authorization",
+                format!("Bearer {}", admin_token),
+            ))
+            .header(Header::new("Content-Type", "application/json"))
+            .body(json!({ "background_position": pos }).to_string())
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::Ok);
+        let dto: SingleResponse<AdminPageAppearanceDto> = res.into_json().await.unwrap();
+        assert_eq!(dto.data.background_position.as_str(), pos);
+    }
+
+    // Invalid position -> rejected
+    let inv_pos = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_position": "left" }).to_string())
+        .dispatch()
+        .await;
+    assert!(
+        inv_pos.status() == Status::UnprocessableEntity || inv_pos.status() == Status::BadRequest
+    );
+
+    // 2. Valid size: contain, cover
+    for sz in ["contain", "cover"] {
+        let res = harness
+            .client
+            .patch("/api/v1/admin/page-appearance")
+            .header(Header::new(
+                "Authorization",
+                format!("Bearer {}", admin_token),
+            ))
+            .header(Header::new("Content-Type", "application/json"))
+            .body(json!({ "background_size": sz }).to_string())
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::Ok);
+        let dto: SingleResponse<AdminPageAppearanceDto> = res.into_json().await.unwrap();
+        assert_eq!(dto.data.background_size.as_str(), sz);
+    }
+
+    // Invalid size -> rejected
+    let inv_sz = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_size": "stretch" }).to_string())
+        .dispatch()
+        .await;
+    assert!(
+        inv_sz.status() == Status::UnprocessableEntity || inv_sz.status() == Status::BadRequest
+    );
+}
+
+#[tokio::test]
+async fn test_page_appearance_partial_patch_and_empty_patch() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // 1. Initial configuration: background image, opacity 0.35, position center, size cover
+    let setup_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(
+            json!({
+                "background_media_id": img_id,
+                "overlay_opacity": 0.35,
+                "background_position": "center",
+                "background_size": "cover"
+            })
+            .to_string(),
+        )
+        .dispatch()
+        .await;
+    assert_eq!(setup_res.status(), Status::Ok);
+
+    // 2. Partial PATCH: only overlay_opacity = 0.6
+    let patch1 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": 0.6 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch1.status(), Status::Ok);
+    let dto1: SingleResponse<AdminPageAppearanceDto> = patch1.into_json().await.unwrap();
+    assert_eq!(dto1.data.overlay_opacity, 0.6);
+    assert_eq!(dto1.data.background_position, BackgroundPosition::Center);
+    assert_eq!(dto1.data.background_size, BackgroundSize::Cover);
+    match &dto1.data.background_media {
+        Some(AdminMediaDto::Image { id, .. }) => assert_eq!(*id, img_id),
+        _ => panic!("Background image must remain intact"),
+    }
+
+    // 3. Partial PATCH: only background_position = "top"
+    let patch2 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_position": "top" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch2.status(), Status::Ok);
+    let dto2: SingleResponse<AdminPageAppearanceDto> = patch2.into_json().await.unwrap();
+    assert_eq!(dto2.data.overlay_opacity, 0.6);
+    assert_eq!(dto2.data.background_position, BackgroundPosition::Top);
+    assert_eq!(dto2.data.background_size, BackgroundSize::Cover);
+    match &dto2.data.background_media {
+        Some(AdminMediaDto::Image { id, .. }) => assert_eq!(*id, img_id),
+        _ => panic!("Background image must remain intact"),
+    }
+
+    // 4. Empty PATCH: {} leaves all settings unchanged
+    let empty_patch = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body("{}")
+        .dispatch()
+        .await;
+    assert_eq!(empty_patch.status(), Status::Ok);
+    let dto_empty: SingleResponse<AdminPageAppearanceDto> = empty_patch.into_json().await.unwrap();
+    assert_eq!(dto_empty.data.overlay_opacity, 0.6);
+    assert_eq!(dto_empty.data.background_position, BackgroundPosition::Top);
+    assert_eq!(dto_empty.data.background_size, BackgroundSize::Cover);
+    assert!(dto_empty.data.background_media.is_some());
+}
+
+#[tokio::test]
+async fn test_page_appearance_media_deactivation_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // 1. Assign image
+    let assign_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(assign_res.status(), Status::Ok);
+
+    // 2. Deactivate/archive media asset in database
+    sqlx::query("UPDATE media_assets SET status = 'archived' WHERE id = $1")
+        .bind(img_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    // 3. Public GET /api/v1/public/page must NOT expose archived image as background
+    let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res.status(), Status::Ok);
+    let pub_dto: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+    assert!(
+        pub_dto.data.appearance.background_media.is_none(),
+        "Public appearance MUST not expose archived/inactive media asset"
+    );
+
+    // 4. Admin PATCH attempting to assign archived media asset must be rejected with 422
+    let patch_inactive = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch_inactive.status(), Status::UnprocessableEntity);
+
+    // 5. Soft-delete media asset and verify public appearance treats it as None
+    sqlx::query(
+        "UPDATE media_assets SET status = 'active', deleted_at = CURRENT_TIMESTAMP WHERE id = $1",
+    )
+    .bind(img_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let pub_res_del = harness.client.get("/api/v1/public/page").dispatch().await;
+    assert_eq!(pub_res_del.status(), Status::Ok);
+    let pub_dto_del: SingleResponse<PublicPageResponse> = pub_res_del.into_json().await.unwrap();
+    assert!(
+        pub_dto_del.data.appearance.background_media.is_none(),
+        "Public appearance MUST not expose soft-deleted media asset"
+    );
+}
+
+#[tokio::test]
+async fn test_page_appearance_authorization_requirements() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    // 1. Unauthenticated requests must fail with 401
+    let get_unauth = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .dispatch()
+        .await;
+    assert_eq!(get_unauth.status(), Status::Unauthorized);
+
+    let patch_unauth = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": 0.5 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch_unauth.status(), Status::Unauthorized);
+
+    // 2. Authenticated editor without content management permission must fail with 403
+    let editor_id = Uuid::new_v4();
+    let editor_email = format!("editor_{}@example.com", editor_id.simple());
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, role, is_active) VALUES ($1, $2, 'dummy_hash', 'Editor', 'editor', TRUE)",
+    )
+    .bind(editor_id)
+    .bind(&editor_email)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let editor_token = TokenService::generate_access_token(
+        editor_id,
+        &editor_email,
+        Role::Editor,
+        &harness.config.jwt_access_secret,
+        900,
+    )
+    .unwrap();
+
+    let get_editor = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", editor_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_editor.status(), Status::Forbidden);
+
+    let patch_editor = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", editor_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "overlay_opacity": 0.5 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch_editor.status(), Status::Forbidden);
+
+    // 3. Authenticated admin user must succeed with 200
+    let admin_token = &harness.super_admin_token;
+    let get_auth = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_auth.status(), Status::Ok);
 }

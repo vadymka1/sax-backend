@@ -4,11 +4,13 @@ pub mod contact_mailer;
 pub mod contact_service;
 pub mod content_block_service;
 pub mod media_service;
+pub mod page_appearance_service;
 pub mod public_page_service;
 pub mod spa_section_service;
 pub mod testimonial_service;
 
 pub use contact_mailer::{ContactMailer, DynContactMailer, NoopContactMailer, SmtpContactMailer};
 pub use contact_service::ContactService;
+pub use page_appearance_service::PageAppearanceService;
 pub use public_page_service::PublicPageService;
 pub use testimonial_service::TestimonialService;

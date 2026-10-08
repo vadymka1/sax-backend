@@ -5,10 +5,12 @@ use uuid::Uuid;
 use sqlx::PgPool;
 
 use crate::application::dto::{
-    PublicContentBlockDto, PublicMediaDto, PublicPageDto, PublicPageResponse, PublicSpaSectionDto,
+    PublicContentBlockDto, PublicMediaDto, PublicPageAppearanceDto, PublicPageDto,
+    PublicPageResponse, PublicSpaSectionDto,
 };
 use crate::domain::locale::Locale;
 use crate::domain::media::YoutubeUrlParser;
+use crate::domain::pages::{BackgroundPosition, BackgroundSize};
 use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 use crate::infrastructure::storage::StorageProvider;
 use crate::shared::errors::{AppError, AppResult};
@@ -37,6 +39,13 @@ impl PublicPageService {
             seo_title: Option<String>,
             seo_description: Option<String>,
             seo_keywords: Option<Vec<String>>,
+            overlay_opacity: Option<f64>,
+            background_position: Option<String>,
+            background_size: Option<String>,
+            bg_media_id: Option<Uuid>,
+            bg_media_type: Option<String>,
+            bg_storage_key: Option<String>,
+            bg_alt_text: Option<String>,
         }
 
         #[derive(sqlx::FromRow)]
@@ -77,9 +86,18 @@ impl PublicPageService {
             en_text: Option<String>,
         }
 
-        // Query 1: Bounded query for home page metadata
+        // Query 1: Bounded query for home page metadata and appearance settings
         let page_row = sqlx::query_as::<_, PageRow>(
-            "SELECT id, slug, title, seo_title, seo_description, seo_keywords FROM pages WHERE slug = 'home' AND deleted_at IS NULL"
+            r#"
+            SELECT 
+                p.id, p.slug, p.title, p.seo_title, p.seo_description, p.seo_keywords,
+                pas.overlay_opacity, pas.background_position, pas.background_size,
+                m.id AS bg_media_id, m.media_type AS bg_media_type, m.storage_key AS bg_storage_key, m.alt_text AS bg_alt_text
+            FROM pages p
+            LEFT JOIN page_appearance_settings pas ON pas.page_id = p.id
+            LEFT JOIN media_assets m ON pas.background_media_id = m.id AND m.deleted_at IS NULL AND m.status = 'active'
+            WHERE p.slug = 'home' AND p.deleted_at IS NULL
+            "#
         )
         .fetch_optional(&self.pool)
         .await
@@ -93,6 +111,39 @@ impl PublicPageService {
             seo_title: page_row.seo_title,
             seo_description: page_row.seo_description,
             seo_keywords: page_row.seo_keywords,
+        };
+
+        let background_media = if let (Some(media_id), Some(media_type)) =
+            (page_row.bg_media_id, page_row.bg_media_type)
+        {
+            if media_type == "image" {
+                let key = page_row.bg_storage_key.unwrap_or_default();
+                let url = self.storage.get_public_url(&key);
+                Some(PublicMediaDto::Image {
+                    id: media_id,
+                    url,
+                    alt_text: page_row.bg_alt_text,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let appearance_dto = PublicPageAppearanceDto {
+            background_media,
+            overlay_opacity: page_row.overlay_opacity.unwrap_or(0.35),
+            background_position: page_row
+                .background_position
+                .as_deref()
+                .and_then(BackgroundPosition::parse)
+                .unwrap_or(BackgroundPosition::Center),
+            background_size: page_row
+                .background_size
+                .as_deref()
+                .and_then(BackgroundSize::parse)
+                .unwrap_or(BackgroundSize::Cover),
         };
 
         // Query 2: Bounded query for visible non-deleted SpaSections with translations ordered deterministically
@@ -470,6 +521,7 @@ impl PublicPageService {
 
         Ok(PublicPageResponse {
             page: page_dto,
+            appearance: appearance_dto,
             sections,
             testimonials,
         })

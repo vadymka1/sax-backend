@@ -24,6 +24,7 @@ struct SpaSectionTranslationRow {
     spa_section_id: Uuid,
     locale: String,
     name: String,
+    navigation_label: Option<String>,
 }
 
 pub struct SpaSectionRepository<'a> {
@@ -126,7 +127,7 @@ impl<'a> SpaSectionRepository<'a> {
 
         let trans_rows = sqlx::query_as::<_, SpaSectionTranslationRow>(
             r#"
-            SELECT spa_section_id, locale, name
+            SELECT spa_section_id, locale, name, navigation_label
             FROM spa_section_translations
             WHERE spa_section_id IN (SELECT id FROM spa_sections WHERE page_id = $1 AND deleted_at IS NULL)
             "#,
@@ -138,24 +139,32 @@ impl<'a> SpaSectionRepository<'a> {
 
         let mut trans_map: std::collections::HashMap<
             Uuid,
-            std::collections::HashMap<String, String>,
+            std::collections::HashMap<String, (String, Option<String>)>,
         > = std::collections::HashMap::new();
         for tr in trans_rows {
             trans_map
                 .entry(tr.spa_section_id)
                 .or_default()
-                .insert(tr.locale, tr.name);
+                .insert(tr.locale, (tr.name, tr.navigation_label));
         }
 
         let dtos = rows
             .into_iter()
             .map(|row| {
                 let section_trans = trans_map.get(&row.id);
-                let en_name = section_trans
-                    .and_then(|m| m.get("en"))
-                    .cloned()
-                    .unwrap_or_else(|| row.title.clone());
-                let de_name = section_trans.and_then(|m| m.get("de")).cloned();
+                let (en_name, en_nav) = match section_trans.and_then(|m| m.get("en")) {
+                    Some((name, nav)) => (
+                        name.clone(),
+                        nav.clone().or_else(|| Some(row.navigation_label.clone())),
+                    ),
+                    None => (row.title.clone(), Some(row.navigation_label.clone())),
+                };
+                let de_trans = section_trans.and_then(|m| m.get("de")).map(|(name, nav)| {
+                    crate::application::dto::SpaSectionTranslationDto {
+                        name: name.clone(),
+                        navigation_label: nav.clone(),
+                    }
+                });
 
                 AdminSpaSectionDto {
                     id: row.id,
@@ -168,9 +177,11 @@ impl<'a> SpaSectionRepository<'a> {
                     created_at: row.created_at,
                     updated_at: row.updated_at,
                     translations: crate::application::dto::SpaSectionTranslationsDto {
-                        en: crate::application::dto::SpaSectionTranslationDto { name: en_name },
-                        de: de_name
-                            .map(|name| crate::application::dto::SpaSectionTranslationDto { name }),
+                        en: crate::application::dto::SpaSectionTranslationDto {
+                            name: en_name,
+                            navigation_label: en_nav,
+                        },
+                        de: de_trans,
                     },
                 }
             })
@@ -215,7 +226,7 @@ impl<'a> SpaSectionRepository<'a> {
 
         let trans_rows = sqlx::query_as::<_, SpaSectionTranslationRow>(
             r#"
-            SELECT spa_section_id, locale, name
+            SELECT spa_section_id, locale, name, navigation_label
             FROM spa_section_translations
             WHERE spa_section_id = $1
             "#,
@@ -225,17 +236,25 @@ impl<'a> SpaSectionRepository<'a> {
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        let mut trans_map: std::collections::HashMap<String, String> =
+        let mut trans_map: std::collections::HashMap<String, (String, Option<String>)> =
             std::collections::HashMap::new();
         for tr in trans_rows {
-            trans_map.insert(tr.locale, tr.name);
+            trans_map.insert(tr.locale, (tr.name, tr.navigation_label));
         }
 
-        let en_name = trans_map
-            .get("en")
-            .cloned()
-            .unwrap_or_else(|| row.title.clone());
-        let de_name = trans_map.get("de").cloned();
+        let (en_name, en_nav) = match trans_map.get("en") {
+            Some((name, nav)) => (
+                name.clone(),
+                nav.clone().or_else(|| Some(row.navigation_label.clone())),
+            ),
+            None => (row.title.clone(), Some(row.navigation_label.clone())),
+        };
+        let de_trans = trans_map.get("de").map(|(name, nav)| {
+            crate::application::dto::SpaSectionTranslationDto {
+                name: name.clone(),
+                navigation_label: nav.clone(),
+            }
+        });
 
         Ok(Some(AdminSpaSectionDto {
             id: row.id,
@@ -248,19 +267,25 @@ impl<'a> SpaSectionRepository<'a> {
             created_at: row.created_at,
             updated_at: row.updated_at,
             translations: crate::application::dto::SpaSectionTranslationsDto {
-                en: crate::application::dto::SpaSectionTranslationDto { name: en_name },
-                de: de_name.map(|name| crate::application::dto::SpaSectionTranslationDto { name }),
+                en: crate::application::dto::SpaSectionTranslationDto {
+                    name: en_name,
+                    navigation_label: en_nav,
+                },
+                de: de_trans,
             },
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_dynamic_for_page(
         &self,
         page_id: Uuid,
         base_key: &str,
         title: &str,
         nav_label: &str,
+        en_nav_label: Option<&str>,
         de_name: Option<&str>,
+        de_nav_label: Option<&str>,
     ) -> AppResult<SpaSection> {
         let mut tx = self
             .pool
@@ -338,15 +363,20 @@ impl<'a> SpaSectionRepository<'a> {
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
         // 5. Insert English translation
+        let effective_en_nav = en_nav_label.or(Some(nav_label));
         sqlx::query(
             r#"
-            INSERT INTO spa_section_translations (spa_section_id, locale, name)
-            VALUES ($1, 'en', $2)
-            ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
+            INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+            VALUES ($1, 'en', $2, $3)
+            ON CONFLICT (spa_section_id, locale) DO UPDATE SET
+                name = EXCLUDED.name,
+                navigation_label = EXCLUDED.navigation_label,
+                updated_at = CURRENT_TIMESTAMP
             "#,
         )
         .bind(id)
         .bind(title)
+        .bind(effective_en_nav)
         .execute(&mut *tx)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
@@ -355,13 +385,17 @@ impl<'a> SpaSectionRepository<'a> {
         if let Some(de) = de_name {
             sqlx::query(
                 r#"
-                INSERT INTO spa_section_translations (spa_section_id, locale, name)
-                VALUES ($1, 'de', $2)
-                ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
+                INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+                VALUES ($1, 'de', $2, $3)
+                ON CONFLICT (spa_section_id, locale) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    navigation_label = EXCLUDED.navigation_label,
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
             )
             .bind(id)
             .bind(de)
+            .bind(de_nav_label)
             .execute(&mut *tx)
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
@@ -374,6 +408,7 @@ impl<'a> SpaSectionRepository<'a> {
         Ok(section)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_section(
         &self,
         id: Uuid,
@@ -381,7 +416,11 @@ impl<'a> SpaSectionRepository<'a> {
         nav_label: Option<&str>,
         is_visible: Option<bool>,
         en_name: Option<&str>,
+        en_nav: Option<&str>,
+        update_en: bool,
         de_name: Option<&str>,
+        de_nav: Option<&str>,
+        update_de: bool,
     ) -> AppResult<Option<SpaSection>> {
         let mut tx = self
             .pool
@@ -389,8 +428,28 @@ impl<'a> SpaSectionRepository<'a> {
             .await
             .map_err(|e| AppError::DatabaseError(e.to_string()))?;
 
-        let effective_title = en_name.or(title);
-        let effective_nav = nav_label.or(en_name);
+        // 1. Fetch current translations inside tx
+        let trans_rows = sqlx::query_as::<_, SpaSectionTranslationRow>(
+            r#"
+            SELECT spa_section_id, locale, name, navigation_label
+            FROM spa_section_translations
+            WHERE spa_section_id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+        let existing_en = trans_rows.iter().find(|r| r.locale == "en");
+        let existing_de = trans_rows.iter().find(|r| r.locale == "de");
+
+        let effective_en_name = en_name
+            .or(title)
+            .or_else(|| existing_en.map(|r| r.name.as_str()));
+        let effective_en_nav = en_nav
+            .or(nav_label)
+            .or_else(|| existing_en.and_then(|r| r.navigation_label.as_deref()));
 
         let section = sqlx::query_as::<_, SpaSection>(
             r#"
@@ -405,8 +464,8 @@ impl<'a> SpaSectionRepository<'a> {
             "#
         )
         .bind(id)
-        .bind(effective_title)
-        .bind(effective_nav)
+        .bind(effective_en_name)
+        .bind(effective_en_nav)
         .bind(is_visible)
         .fetch_optional(&mut *tx)
         .await
@@ -416,36 +475,52 @@ impl<'a> SpaSectionRepository<'a> {
             return Ok(None);
         }
 
-        // Upsert EN translation if provided (or if legacy title updated)
-        if let Some(en) = effective_title {
-            sqlx::query(
-                r#"
-                INSERT INTO spa_section_translations (spa_section_id, locale, name)
-                VALUES ($1, 'en', $2)
-                ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
-                "#,
-            )
-            .bind(id)
-            .bind(en)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        // Upsert EN translation if updated or if legacy title/nav updated
+        if update_en || title.is_some() || nav_label.is_some() {
+            if let Some(final_en_name) = effective_en_name {
+                sqlx::query(
+                    r#"
+                    INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+                    VALUES ($1, 'en', $2, $3)
+                    ON CONFLICT (spa_section_id, locale) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        navigation_label = EXCLUDED.navigation_label,
+                        updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(id)
+                .bind(final_en_name)
+                .bind(effective_en_nav)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            }
         }
 
-        // Upsert DE translation if provided
-        if let Some(de) = de_name {
-            sqlx::query(
-                r#"
-                INSERT INTO spa_section_translations (spa_section_id, locale, name)
-                VALUES ($1, 'de', $2)
-                ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, updated_at = CURRENT_TIMESTAMP
-                "#,
-            )
-            .bind(id)
-            .bind(de)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        // Upsert DE translation if updated
+        if update_de {
+            let effective_de_name = de_name.or_else(|| existing_de.map(|r| r.name.as_str()));
+            let effective_de_nav =
+                de_nav.or_else(|| existing_de.and_then(|r| r.navigation_label.as_deref()));
+
+            if let Some(final_de_name) = effective_de_name {
+                sqlx::query(
+                    r#"
+                    INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+                    VALUES ($1, 'de', $2, $3)
+                    ON CONFLICT (spa_section_id, locale) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        navigation_label = EXCLUDED.navigation_label,
+                        updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(id)
+                .bind(final_de_name)
+                .bind(effective_de_nav)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            }
         }
 
         tx.commit()

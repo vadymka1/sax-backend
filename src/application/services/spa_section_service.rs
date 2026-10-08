@@ -109,7 +109,7 @@ impl<'a> SpaSectionService<'a> {
 
         let mut errors = Vec::new();
 
-        let (en_name, de_name) = if let Some(ref trans) = req.translations {
+        let (en_name, en_nav, de_name, de_nav) = if let Some(ref trans) = req.translations {
             let en_trimmed = trans.en.name.trim();
             if en_trimmed.is_empty() {
                 errors.push(ApiErrorDetails {
@@ -123,9 +123,48 @@ impl<'a> SpaSectionService<'a> {
                 });
             }
 
-            let de_val = if let Some(ref de) = trans.de {
+            let en_nav_val = if let Some(ref nav) = trans.en.navigation_label {
+                let trimmed = nav.trim();
+                if trimmed.is_empty() {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.en.navigation_label".to_string(),
+                        message: "English navigation label cannot be empty".to_string(),
+                    });
+                    None
+                } else if trimmed.len() > 100 {
+                    errors.push(ApiErrorDetails {
+                        field: "translations.en.navigation_label".to_string(),
+                        message: "English navigation label cannot exceed 100 characters"
+                            .to_string(),
+                    });
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else if let Some(ref nav) = req.navigation_label {
+                let trimmed = nav.trim();
+                if trimmed.is_empty() {
+                    errors.push(ApiErrorDetails {
+                        field: "navigation_label".to_string(),
+                        message: "Navigation label cannot be empty".to_string(),
+                    });
+                    None
+                } else if trimmed.len() > 100 {
+                    errors.push(ApiErrorDetails {
+                        field: "navigation_label".to_string(),
+                        message: "Navigation label cannot exceed 100 characters".to_string(),
+                    });
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                Some(en_trimmed.to_string())
+            };
+
+            let (de_val, de_nav_val) = if let Some(ref de) = trans.de {
                 let de_trimmed = de.name.trim();
-                if de_trimmed.is_empty() {
+                let de_n = if de_trimmed.is_empty() {
                     errors.push(ApiErrorDetails {
                         field: "translations.de.name".to_string(),
                         message: "German name cannot be empty or whitespace".to_string(),
@@ -139,12 +178,32 @@ impl<'a> SpaSectionService<'a> {
                     None
                 } else {
                     Some(de_trimmed.to_string())
-                }
+                };
+
+                let de_nav_v = if let Some(ref nav) = de.navigation_label {
+                    let trimmed = nav.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else if trimmed.len() > 100 {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.de.navigation_label".to_string(),
+                            message: "German navigation label cannot exceed 100 characters"
+                                .to_string(),
+                        });
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                } else {
+                    None
+                };
+
+                (de_n, de_nav_v)
             } else {
-                None
+                (None, None)
             };
 
-            (en_trimmed.to_string(), de_val)
+            (en_trimmed.to_string(), en_nav_val, de_val, de_nav_val)
         } else if !req.title.trim().is_empty() {
             let title_trimmed = req.title.trim();
             if title_trimmed.len() > 255 {
@@ -153,31 +212,37 @@ impl<'a> SpaSectionService<'a> {
                     message: "Title cannot exceed 255 characters".to_string(),
                 });
             }
-            (title_trimmed.to_string(), None)
+
+            let nav_trimmed = match req.navigation_label {
+                Some(ref l) => {
+                    let trimmed = l.trim();
+                    if trimmed.is_empty() {
+                        errors.push(ApiErrorDetails {
+                            field: "navigation_label".to_string(),
+                            message: "Navigation label cannot be empty".to_string(),
+                        });
+                        title_trimmed.to_string()
+                    } else if trimmed.len() > 100 {
+                        errors.push(ApiErrorDetails {
+                            field: "navigation_label".to_string(),
+                            message: "Navigation label cannot exceed 100 characters".to_string(),
+                        });
+                        title_trimmed.to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                }
+                None => title_trimmed.to_string(),
+            };
+
+            (title_trimmed.to_string(), Some(nav_trimmed), None, None)
         } else {
             errors.push(ApiErrorDetails {
                 field: "title".to_string(),
                 message: "Title or translations is required".to_string(),
             });
-            (String::new(), None)
+            (String::new(), None, None, None)
         };
-
-        let nav_label = match req.navigation_label {
-            Some(ref l) => l.trim().to_string(),
-            None => en_name.clone(),
-        };
-
-        if nav_label.is_empty() && errors.is_empty() {
-            errors.push(ApiErrorDetails {
-                field: "navigation_label".to_string(),
-                message: "Navigation label cannot be empty".to_string(),
-            });
-        } else if nav_label.len() > 100 {
-            errors.push(ApiErrorDetails {
-                field: "navigation_label".to_string(),
-                message: "Navigation label cannot exceed 100 characters".to_string(),
-            });
-        }
 
         if !errors.is_empty() {
             return Err(AppError::ValidationError(errors));
@@ -185,10 +250,19 @@ impl<'a> SpaSectionService<'a> {
 
         let home_id = self.get_home_page_id().await?;
         let base_key = generate_slug(&en_name);
+        let legacy_nav = en_nav.clone().unwrap_or_else(|| en_name.clone());
 
         let created = self
             .repo
-            .create_dynamic_for_page(home_id, &base_key, &en_name, &nav_label, de_name.as_deref())
+            .create_dynamic_for_page(
+                home_id,
+                &base_key,
+                &en_name,
+                &legacy_nav,
+                en_nav.as_deref(),
+                de_name.as_deref(),
+                de_nav.as_deref(),
+            )
             .await?;
 
         self.repo
@@ -210,7 +284,7 @@ impl<'a> SpaSectionService<'a> {
         let home_id = self.get_home_page_id().await?;
 
         // Verify section exists and belongs to home page
-        let _existing = self
+        let existing = self
             .repo
             .find_admin_by_id(home_id, id)
             .await?
@@ -254,60 +328,112 @@ impl<'a> SpaSectionService<'a> {
             None
         };
 
-        let (en_opt, de_opt) = if let Some(ref trans) = req.translations {
-            let en_val = if let Some(ref en) = trans.en {
-                let trimmed = en.name.trim();
-                if trimmed.is_empty() {
-                    errors.push(ApiErrorDetails {
-                        field: "translations.en.name".to_string(),
-                        message: "English name cannot be empty".to_string(),
-                    });
-                    None
-                } else if trimmed.len() > 255 {
-                    errors.push(ApiErrorDetails {
-                        field: "translations.en.name".to_string(),
-                        message: "English name cannot exceed 255 characters".to_string(),
-                    });
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            } else {
-                None
-            };
+        let mut update_en = false;
+        let mut en_name_val: Option<String> = None;
+        let mut en_nav_val: Option<String> = None;
 
-            let de_val = if let Some(ref de) = trans.de {
-                let trimmed = de.name.trim();
-                if trimmed.is_empty() {
+        let mut update_de = false;
+        let mut de_name_val: Option<String> = None;
+        let mut de_nav_val: Option<String> = None;
+
+        if let Some(ref trans) = req.translations {
+            if let Some(ref en) = trans.en {
+                update_en = true;
+                if let Some(ref n) = en.name {
+                    let trimmed = n.trim();
+                    if trimmed.is_empty() {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.en.name".to_string(),
+                            message: "English name cannot be empty".to_string(),
+                        });
+                    } else if trimmed.len() > 255 {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.en.name".to_string(),
+                            message: "English name cannot exceed 255 characters".to_string(),
+                        });
+                    } else {
+                        en_name_val = Some(trimmed.to_string());
+                    }
+                }
+
+                if let Some(ref nav) = en.navigation_label {
+                    let trimmed = nav.trim();
+                    if trimmed.is_empty() {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.en.navigation_label".to_string(),
+                            message: "English navigation label cannot be empty".to_string(),
+                        });
+                    } else if trimmed.len() > 100 {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.en.navigation_label".to_string(),
+                            message: "English navigation label cannot exceed 100 characters"
+                                .to_string(),
+                        });
+                    } else {
+                        en_nav_val = Some(trimmed.to_string());
+                    }
+                }
+            }
+
+            if let Some(ref de) = trans.de {
+                update_de = true;
+                let de_exists = existing.translations.de.is_some();
+
+                if let Some(ref n) = de.name {
+                    let trimmed = n.trim();
+                    if trimmed.is_empty() {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.de.name".to_string(),
+                            message: "German name cannot be empty or whitespace".to_string(),
+                        });
+                    } else if trimmed.len() > 255 {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.de.name".to_string(),
+                            message: "German name cannot exceed 255 characters".to_string(),
+                        });
+                    } else {
+                        de_name_val = Some(trimmed.to_string());
+                    }
+                } else if !de_exists {
                     errors.push(ApiErrorDetails {
                         field: "translations.de.name".to_string(),
-                        message: "German name cannot be empty or whitespace".to_string(),
+                        message: "German name is required when creating a new German translation"
+                            .to_string(),
                     });
-                    None
-                } else if trimmed.len() > 255 {
-                    errors.push(ApiErrorDetails {
-                        field: "translations.de.name".to_string(),
-                        message: "German name cannot exceed 255 characters".to_string(),
-                    });
-                    None
-                } else {
-                    Some(trimmed)
                 }
-            } else {
-                None
-            };
 
-            (en_val, de_val)
-        } else {
-            (None, None)
-        };
+                if let Some(ref nav) = de.navigation_label {
+                    let trimmed = nav.trim();
+                    if trimmed.len() > 100 {
+                        errors.push(ApiErrorDetails {
+                            field: "translations.de.navigation_label".to_string(),
+                            message: "German navigation label cannot exceed 100 characters"
+                                .to_string(),
+                        });
+                    } else {
+                        de_nav_val = Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
 
         if !errors.is_empty() {
             return Err(AppError::ValidationError(errors));
         }
 
         self.repo
-            .update_section(id, title_opt, nav_label_opt, req.is_visible, en_opt, de_opt)
+            .update_section(
+                id,
+                title_opt,
+                nav_label_opt,
+                req.is_visible,
+                en_name_val.as_deref(),
+                en_nav_val.as_deref(),
+                update_en,
+                de_name_val.as_deref(),
+                de_nav_val.as_deref(),
+                update_de,
+            )
             .await?;
 
         self.repo

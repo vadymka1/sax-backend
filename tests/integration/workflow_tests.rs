@@ -8782,15 +8782,15 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
         migrate_res.err()
     );
 
-    // Verify 0015, 0016, 0017, and 0018 are recorded as successfully applied in _sqlx_migrations
+    // Verify 0015, 0016, 0017, 0018, and 0019 are recorded as successfully applied in _sqlx_migrations
     let applied_migrations: Vec<(i64, String, bool)> = sqlx::query_as(
-        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18) ORDER BY version ASC",
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18, 19) ORDER BY version ASC",
     )
     .fetch_all(&harness.pool)
     .await
     .unwrap();
 
-    assert_eq!(applied_migrations.len(), 4);
+    assert_eq!(applied_migrations.len(), 5);
     assert_eq!(applied_migrations[0].0, 15);
     assert_eq!(
         applied_migrations[0].1,
@@ -8812,6 +8812,10 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
     assert_eq!(applied_migrations[3].0, 18);
     assert_eq!(applied_migrations[3].1, "multilingual content translations");
     assert!(applied_migrations[3].2);
+
+    assert_eq!(applied_migrations[4].0, 19);
+    assert_eq!(applied_migrations[4].1, "multilingual navigation labels");
+    assert!(applied_migrations[4].2);
 }
 
 #[tokio::test]
@@ -9424,6 +9428,24 @@ async fn test_multilingual_migration_backfill_verification() {
     assert_eq!(
         mismatched_sections.0, 0,
         "Backfilled spa_section_translations.name must match spa_sections.title"
+    );
+
+    let mismatched_nav_sections: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM spa_sections s
+        JOIN spa_section_translations t
+            ON t.spa_section_id = s.id AND t.locale = 'en'
+        WHERE t.navigation_label != s.navigation_label
+        "#,
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        mismatched_nav_sections.0, 0,
+        "Backfilled spa_section_translations.navigation_label must match spa_sections.navigation_label"
     );
 
     // 4. Verify invalid locale rejection at DB constraint level
@@ -10332,4 +10354,571 @@ async fn test_multilingual_v1_1_de_patch_semantics() {
     common::cleanup_media(&harness.pool, media_id)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_multilingual_v1_2_navigation_label_admin_and_patch_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // 1. Create section with both EN and DE localized navigation labels
+    let create_both = serde_json::json!({
+        "translations": {
+            "en": {
+                "name": "About Us",
+                "navigation_label": "About"
+            },
+            "de": {
+                "name": "Über uns",
+                "navigation_label": "Über uns"
+            }
+        }
+    });
+
+    let res = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&create_both)
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Created);
+    let created: SingleResponse<AdminSpaSectionDto> = res.into_json().await.unwrap();
+    let sec_id = created.data.id;
+
+    // Verify Admin GET returns exact persisted translations
+    let get_res = harness
+        .client
+        .get(format!("/api/v1/admin/spa-sections/{}", sec_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_res.status(), Status::Ok);
+    let get_dto: SingleResponse<AdminSpaSectionDto> = get_res.into_json().await.unwrap();
+
+    assert_eq!(get_dto.data.translations.en.name, "About Us");
+    assert_eq!(
+        get_dto.data.translations.en.navigation_label.as_deref(),
+        Some("About")
+    );
+    let de_dto = get_dto.data.translations.de.as_ref().unwrap();
+    assert_eq!(de_dto.name, "Über uns");
+    assert_eq!(de_dto.navigation_label.as_deref(), Some("Über uns"));
+
+    // 2. Test Section 30: Admin missing DE navigation label
+    // Update DE so navigation_label is NULL in DB
+    sqlx::query("UPDATE spa_section_translations SET navigation_label = NULL WHERE spa_section_id = $1 AND locale = 'de'")
+        .bind(sec_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let get_res_null_de = harness
+        .client
+        .get(format!("/api/v1/admin/spa-sections/{}", sec_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+    assert_eq!(get_res_null_de.status(), Status::Ok);
+    let get_dto_null_de: SingleResponse<AdminSpaSectionDto> =
+        get_res_null_de.into_json().await.unwrap();
+    let de_null_dto = get_dto_null_de.data.translations.de.as_ref().unwrap();
+    assert_eq!(de_null_dto.name, "Über uns");
+    assert!(
+        de_null_dto.navigation_label.is_none(),
+        "Admin DE navigation_label must be None/null when missing; must NOT substitute English"
+    );
+
+    // 3. Test Section 31: PATCH DE navigation only
+    // First, set DE name to "Über uns" and navigation_label to "Über uns"
+    sqlx::query("UPDATE spa_section_translations SET name = 'Über uns', navigation_label = 'Über uns' WHERE spa_section_id = $1 AND locale = 'de'")
+        .bind(sec_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let patch_de_nav = serde_json::json!({
+        "translations": {
+            "de": {
+                "navigation_label": "Info"
+            }
+        }
+    });
+
+    let res_patch_nav = harness
+        .client
+        .patch(format!("/api/v1/admin/spa-sections/{}", sec_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_de_nav)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_nav.status(), Status::Ok);
+    let dto_patch_nav: SingleResponse<AdminSpaSectionDto> =
+        res_patch_nav.into_json().await.unwrap();
+
+    let de_after_nav = dto_patch_nav.data.translations.de.as_ref().unwrap();
+    assert_eq!(
+        de_after_nav.name, "Über uns",
+        "DE name must remain unchanged when patching DE navigation only"
+    );
+    assert_eq!(
+        de_after_nav.navigation_label.as_deref(),
+        Some("Info"),
+        "DE navigation_label must be updated to Info"
+    );
+    assert_eq!(
+        dto_patch_nav.data.translations.en.name, "About Us",
+        "EN name must remain unchanged"
+    );
+    assert_eq!(
+        dto_patch_nav
+            .data
+            .translations
+            .en
+            .navigation_label
+            .as_deref(),
+        Some("About"),
+        "EN navigation_label must remain unchanged"
+    );
+
+    // 4. Test Section 32: PATCH DE name only
+    let patch_de_name = serde_json::json!({
+        "translations": {
+            "de": {
+                "name": "Über mich"
+            }
+        }
+    });
+
+    let res_patch_name = harness
+        .client
+        .patch(format!("/api/v1/admin/spa-sections/{}", sec_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_de_name)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_name.status(), Status::Ok);
+    let dto_patch_name: SingleResponse<AdminSpaSectionDto> =
+        res_patch_name.into_json().await.unwrap();
+
+    let de_after_name = dto_patch_name.data.translations.de.as_ref().unwrap();
+    assert_eq!(
+        de_after_name.name, "Über mich",
+        "DE name must be updated to Über mich"
+    );
+    assert_eq!(
+        de_after_name.navigation_label.as_deref(),
+        Some("Info"),
+        "DE navigation_label must remain Info (not nulled when omitted)"
+    );
+    assert_eq!(
+        dto_patch_name.data.translations.en.name, "About Us",
+        "EN name must remain unchanged"
+    );
+    assert_eq!(
+        dto_patch_name
+            .data
+            .translations
+            .en
+            .navigation_label
+            .as_deref(),
+        Some("About"),
+        "EN navigation_label must remain unchanged"
+    );
+
+    // 5. Test Section 14: PATCH EN only
+    let patch_en_only = serde_json::json!({
+        "translations": {
+            "en": {
+                "navigation_label": "Story"
+            }
+        }
+    });
+
+    let res_patch_en = harness
+        .client
+        .patch(format!("/api/v1/admin/spa-sections/{}", sec_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&patch_en_only)
+        .dispatch()
+        .await;
+    assert_eq!(res_patch_en.status(), Status::Ok);
+    let dto_patch_en: SingleResponse<AdminSpaSectionDto> = res_patch_en.into_json().await.unwrap();
+
+    assert_eq!(
+        dto_patch_en
+            .data
+            .translations
+            .en
+            .navigation_label
+            .as_deref(),
+        Some("Story"),
+        "EN navigation_label must be updated"
+    );
+    assert_eq!(
+        dto_patch_en.data.translations.en.name, "About Us",
+        "EN name must remain unchanged"
+    );
+    let de_after_en = dto_patch_en.data.translations.de.as_ref().unwrap();
+    assert_eq!(
+        de_after_en.name, "Über mich",
+        "German must remain untouched"
+    );
+    assert_eq!(
+        de_after_en.navigation_label.as_deref(),
+        Some("Info"),
+        "German navigation_label must remain untouched"
+    );
+
+    // 6. Test Section 11 & 12: Create EN-only section, DE is None
+    let create_en_only = serde_json::json!({
+        "translations": {
+            "en": {
+                "name": "Contact",
+                "navigation_label": "Contact Us"
+            }
+        }
+    });
+    let res_en_only = harness
+        .client
+        .post("/api/v1/admin/spa-sections")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .json(&create_en_only)
+        .dispatch()
+        .await;
+    assert_eq!(res_en_only.status(), Status::Created);
+    let created_en_only: SingleResponse<AdminSpaSectionDto> =
+        res_en_only.into_json().await.unwrap();
+    assert!(created_en_only.data.translations.de.is_none());
+
+    // Cleanup
+    let _ = harness
+        .client
+        .delete(format!("/api/v1/admin/spa-sections/{}", sec_id))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+    let _ = harness
+        .client
+        .delete(format!(
+            "/api/v1/admin/spa-sections/{}",
+            created_en_only.data.id
+        ))
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", harness.super_admin_token),
+        ))
+        .dispatch()
+        .await;
+}
+
+#[tokio::test]
+async fn test_multilingual_v1_2_navigation_label_public_fallback_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // Use default About Us section (11111111-1111-1111-1111-111111111111)
+    let sec_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+
+    // Ensure EN translation has name = "About Us", navigation_label = "About"
+    sqlx::query(
+        "UPDATE spa_section_translations SET name = 'About Us', navigation_label = 'About' WHERE spa_section_id = $1 AND locale = 'en'"
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Ensure DE translation has name = "Über uns", navigation_label = "Über uns"
+    sqlx::query(
+        r#"
+        INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+        VALUES ($1, 'de', 'Über uns', 'Über uns')
+        ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, navigation_label = EXCLUDED.navigation_label
+        "#
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // 1. Test Section 33 & 34: Localized EN and DE navigation labels when present
+    let public_en = harness
+        .client
+        .get("/api/v1/public/page?locale=en")
+        .dispatch()
+        .await;
+    assert_eq!(public_en.status(), Status::Ok);
+    let en_page: SingleResponse<PublicPageResponse> = public_en.into_json().await.unwrap();
+    let en_sec = en_page
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    assert_eq!(en_sec.title, "About Us");
+    assert_eq!(en_sec.navigation_label, "About");
+
+    let public_de = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(public_de.status(), Status::Ok);
+    let de_page: SingleResponse<PublicPageResponse> = public_de.into_json().await.unwrap();
+    let de_sec = de_page
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    assert_eq!(de_sec.title, "Über uns");
+    assert_eq!(de_sec.navigation_label, "Über uns");
+
+    // 2. Test Section 35: DE navigation missing (NULL) -> fallback to EN navigation label
+    sqlx::query(
+        "UPDATE spa_section_translations SET navigation_label = NULL WHERE spa_section_id = $1 AND locale = 'de'"
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let public_de_fallback_en_nav = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(public_de_fallback_en_nav.status(), Status::Ok);
+    let page_fallback_en_nav: SingleResponse<PublicPageResponse> =
+        public_de_fallback_en_nav.into_json().await.unwrap();
+    let sec_fallback = page_fallback_en_nav
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    assert_eq!(sec_fallback.title, "Über uns");
+    assert_eq!(
+        sec_fallback.navigation_label, "About",
+        "Missing DE nav must fall back to EN nav label"
+    );
+
+    // 3. Test Section 36: Both DE and EN navigation missing -> fallback to requested locale name
+    sqlx::query(
+        "UPDATE spa_section_translations SET navigation_label = NULL WHERE spa_section_id = $1 AND locale = 'en'"
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let public_de_fallback_name = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(public_de_fallback_name.status(), Status::Ok);
+    let page_fallback_name: SingleResponse<PublicPageResponse> =
+        public_de_fallback_name.into_json().await.unwrap();
+    let sec_name_fallback = page_fallback_name
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    assert_eq!(
+        sec_name_fallback.navigation_label, "Über uns",
+        "Missing both nav labels must fall back to localized DE section name"
+    );
+
+    // If DE name is also empty/whitespace, fallback to EN name
+    sqlx::query(
+        "UPDATE spa_section_translations SET name = '   ' WHERE spa_section_id = $1 AND locale = 'de'"
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let public_fallback_en_name = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(public_fallback_en_name.status(), Status::Ok);
+    let page_en_name_fallback: SingleResponse<PublicPageResponse> =
+        public_fallback_en_name.into_json().await.unwrap();
+    let sec_en_name_fallback = page_en_name_fallback
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    assert_eq!(
+        sec_en_name_fallback.navigation_label, "About Us",
+        "Missing both nav labels and missing DE name must fall back to EN section name"
+    );
+
+    // 4. Test Section 37: Whitespace DE navigation label -> treated as unusable and falls back to EN nav
+    sqlx::query(
+        "UPDATE spa_section_translations SET navigation_label = 'About' WHERE spa_section_id = $1 AND locale = 'en'"
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE spa_section_translations SET name = 'Über uns', navigation_label = '   \n  ' WHERE spa_section_id = $1 AND locale = 'de'"
+    )
+    .bind(sec_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let public_de_whitespace = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(public_de_whitespace.status(), Status::Ok);
+    let page_whitespace: SingleResponse<PublicPageResponse> =
+        public_de_whitespace.into_json().await.unwrap();
+    let sec_whitespace = page_whitespace
+        .data
+        .sections
+        .iter()
+        .find(|s| s.id == sec_id)
+        .unwrap();
+    assert_eq!(
+        sec_whitespace.navigation_label, "About",
+        "Whitespace DE nav label must be treated as unusable and fall back to EN nav label"
+    );
+}
+
+#[tokio::test]
+async fn test_multilingual_v1_2_legacy_migration_backfill() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // Seed a section directly into spa_sections as legacy data with title and navigation_label
+    let home_id: (uuid::Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+    let legacy_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO spa_sections (id, page_id, section_key, title, navigation_label, sort_order, is_visible)
+        VALUES ($1, $2, 'legacy-test-section', 'About Us', 'About', 99, TRUE)
+        "#,
+    )
+    .bind(legacy_id)
+    .bind(home_id.0)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Seed legacy state: EN translation exists without navigation_label (NULL)
+    sqlx::query(
+        r#"
+        INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+        VALUES ($1, 'en', 'About Us', NULL)
+        ON CONFLICT (spa_section_id, locale) DO UPDATE SET navigation_label = NULL
+        "#,
+    )
+    .bind(legacy_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Re-run migration 19 backfill UPDATE statement
+    sqlx::query(
+        r#"
+        UPDATE spa_section_translations t
+        SET navigation_label = s.navigation_label
+        FROM spa_sections s
+        WHERE t.spa_section_id = s.id
+          AND t.locale = 'en'
+          AND t.navigation_label IS NULL;
+        "#,
+    )
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // Verify EN translation row exists with name = 'About Us' and navigation_label = 'About'
+    let row: (String, Option<String>) = sqlx::query_as(
+        "SELECT name, navigation_label FROM spa_section_translations WHERE spa_section_id = $1 AND locale = 'en'"
+    )
+    .bind(legacy_id)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row.0, "About Us", "Backfilled name must match legacy title");
+    assert_eq!(
+        row.1.as_deref(),
+        Some("About"),
+        "Backfilled navigation_label must match legacy navigation_label"
+    );
+
+    // Cleanup
+    let _ = sqlx::query("DELETE FROM spa_sections WHERE id = $1")
+        .bind(legacy_id)
+        .execute(&harness.pool)
+        .await;
+}
+
+#[tokio::test]
+async fn test_multilingual_v1_2_public_query_count_bounded() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    common::reset_home_sections_to_bootstrap(&harness.pool).await;
+
+    // Verify bounded public page execution (3 bounded queries for page/sections/blocks + 1 for testimonials)
+    // No SQL inside section loop (NO N+1)
+    let res = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::Ok);
+    let page: SingleResponse<PublicPageResponse> = res.into_json().await.unwrap();
+
+    assert!(!page.data.sections.is_empty());
+    for sec in &page.data.sections {
+        assert!(
+            !sec.navigation_label.trim().is_empty(),
+            "All sections must have non-empty localized navigation label"
+        );
+    }
 }

@@ -273,9 +273,9 @@ pub async fn reset_home_sections_to_bootstrap(pool: &PgPool) {
 
     // Ensure English translations exist for all canonical spa_sections
     sqlx::query(
-        "INSERT INTO spa_section_translations (spa_section_id, locale, name)
-         SELECT id, 'en', title FROM spa_sections
-         ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name",
+        "INSERT INTO spa_section_translations (spa_section_id, locale, name, navigation_label)
+         SELECT id, 'en', title, navigation_label FROM spa_sections
+         ON CONFLICT (spa_section_id, locale) DO UPDATE SET name = EXCLUDED.name, navigation_label = EXCLUDED.navigation_label",
     )
     .execute(pool)
     .await

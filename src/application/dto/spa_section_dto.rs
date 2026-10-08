@@ -3,14 +3,21 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+/// Localized representation of a SpaSection in a specific locale.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SpaSectionTranslationDto {
+    /// Localized section display name/title.
     pub name: String,
+    /// Localized navigation label for menu display.
+    pub navigation_label: Option<String>,
 }
 
+/// Admin translations container for a SpaSection.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SpaSectionTranslationsDto {
+    /// Canonical English translation (always present).
     pub en: SpaSectionTranslationDto,
+    /// German translation (present only if created).
     pub de: Option<SpaSectionTranslationDto>,
 }
 
@@ -28,9 +35,14 @@ pub struct AdminSpaSectionDto {
     pub translations: SpaSectionTranslationsDto,
 }
 
+/// Request payload to create localized section content.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateSpaSectionTranslationRequest {
+    /// Localized section name.
     pub name: String,
+    /// Localized navigation label. Optional; defaults to English name if omitted for EN.
+    #[serde(default)]
+    pub navigation_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -47,9 +59,15 @@ pub struct CreateSpaSectionRequest {
     pub translations: Option<CreateSpaSectionTranslationsRequest>,
 }
 
+/// Request payload to update localized section content. Supports partial updates per locale.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSpaSectionTranslationRequest {
-    pub name: String,
+    /// Optional updated section name. Omitted leaves name unchanged.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional updated navigation label. Omitted leaves label unchanged.
+    #[serde(default)]
+    pub navigation_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -51,7 +51,10 @@ pub struct PublicContentBlockDto {
 pub struct PublicSpaSectionDto {
     pub id: Uuid,
     pub key: String,
+    /// Localized section title with fallback (requested locale -> English).
     pub title: String,
+    /// Localized navigation label with 5-tier fallback:
+    /// (1) requested locale nav -> (2) English nav -> (3) requested locale name -> (4) English name -> (5) legacy navigation_label.
     pub navigation_label: String,
     pub sort_order: i32,
     pub blocks: Vec<PublicContentBlockDto>,

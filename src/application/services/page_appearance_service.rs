@@ -5,8 +5,13 @@ use uuid::Uuid;
 
 use crate::api::guards::AuthenticatedUser;
 use crate::application::dto::{AdminMediaDto, AdminPageAppearanceDto, UpdatePageAppearanceRequest};
-use crate::domain::pages::{BackgroundPosition, BackgroundSize, PageAppearanceSettings};
-use crate::infrastructure::repositories::page_appearance_repository::PageAppearanceRepository;
+use crate::domain::pages::{
+    validate_and_normalize_hex_color, BackgroundMode, BackgroundPosition, BackgroundSize,
+    PageAppearanceSettings,
+};
+use crate::infrastructure::repositories::page_appearance_repository::{
+    PageAppearanceRepository, UpsertAppearanceParams,
+};
 use crate::infrastructure::storage::StorageProvider;
 use crate::shared::errors::{ApiErrorDetails, AppError, AppResult};
 
@@ -68,6 +73,8 @@ impl<'a> PageAppearanceService<'a> {
                 };
 
                 Ok(AdminPageAppearanceDto {
+                    background_mode: BackgroundMode::parse(&r.background_mode).unwrap_or_default(),
+                    background_color: r.background_color,
                     background_media,
                     overlay_opacity: r.overlay_opacity,
                     background_position: BackgroundPosition::parse(&r.background_position)
@@ -76,6 +83,8 @@ impl<'a> PageAppearanceService<'a> {
                 })
             }
             None => Ok(AdminPageAppearanceDto {
+                background_mode: BackgroundMode::None,
+                background_color: "#FFFFFF".to_string(),
                 background_media: None,
                 overlay_opacity: 0.35,
                 background_position: BackgroundPosition::Center,
@@ -106,7 +115,23 @@ impl<'a> PageAppearanceService<'a> {
             }
         }
 
-        // 2. Validate background media if provided
+        // 2. Validate background color
+        let mut normalized_color = None;
+        if let Some(ref color) = req.background_color {
+            match validate_and_normalize_hex_color(color) {
+                Ok(norm) => {
+                    normalized_color = Some(norm);
+                }
+                Err(err_msg) => {
+                    errors.push(ApiErrorDetails {
+                        field: "background_color".to_string(),
+                        message: err_msg,
+                    });
+                }
+            }
+        }
+
+        // 3. Validate background media if provided as Some(Some(id))
         if let Some(Some(media_id)) = req.background_media_id {
             let row: Option<(String, String)> = sqlx::query_as(
                 "SELECT media_type, status FROM media_assets WHERE id = $1 AND deleted_at IS NULL",
@@ -158,19 +183,77 @@ impl<'a> PageAppearanceService<'a> {
                 ..Default::default()
             });
 
-        let new_bg = match req.background_media_id {
+        let final_mode = req.background_mode.unwrap_or(current.background_mode);
+        let final_color = normalized_color.unwrap_or(current.background_color);
+        let final_media_id = match req.background_media_id {
             Some(val) => val,
             None => current.background_media_id,
         };
-
-        let new_opacity = req.overlay_opacity.unwrap_or(current.overlay_opacity);
-        let new_position = req
+        let final_opacity = req.overlay_opacity.unwrap_or(current.overlay_opacity);
+        let final_position = req
             .background_position
             .unwrap_or(current.background_position);
-        let new_size = req.background_size.unwrap_or(current.background_size);
+        let final_size = req.background_size.unwrap_or(current.background_size);
+
+        // 4. Final-state validation:
+        // When final_mode is Image, a valid active image media asset MUST be assigned.
+        if final_mode == BackgroundMode::Image {
+            match final_media_id {
+                Some(media_id) => {
+                    // If media_id was not explicitly passed in this request, verify the currently assigned media is still active and image
+                    if req.background_media_id.is_none() {
+                        let row: Option<(String, String)> = sqlx::query_as(
+                            "SELECT media_type, status FROM media_assets WHERE id = $1 AND deleted_at IS NULL",
+                        )
+                        .bind(media_id)
+                        .fetch_optional(self.pool)
+                        .await
+                        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+
+                        match row {
+                            Some((media_type, status)) => {
+                                if status != "active" || media_type != "image" {
+                                    errors.push(ApiErrorDetails {
+                                        field: "background_mode".to_string(),
+                                        message:
+                                            "Assigned background media is not an active image asset"
+                                                .to_string(),
+                                    });
+                                }
+                            }
+                            None => {
+                                errors.push(ApiErrorDetails {
+                                    field: "background_mode".to_string(),
+                                    message: "Assigned background media asset not found"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                None => {
+                    errors.push(ApiErrorDetails {
+                        field: "background_mode".to_string(),
+                        message: "Background mode 'image' requires an active background image asset to be assigned".to_string(),
+                    });
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(AppError::ValidationError(errors));
+        }
 
         self.repo
-            .upsert(page_id, new_bg, new_opacity, new_position, new_size)
+            .upsert(UpsertAppearanceParams {
+                page_id,
+                background_mode: final_mode,
+                background_color: &final_color,
+                background_media_id: final_media_id,
+                overlay_opacity: final_opacity,
+                background_position: final_position,
+                background_size: final_size,
+            })
             .await?;
 
         self.get_appearance(auth).await

@@ -154,6 +154,7 @@ fn swagger_ui_redirect() -> Redirect {
             routes::health::ReadinessCheckDetails,
             crate::domain::locale::Locale,
             crate::domain::users::Role,
+            crate::domain::pages::BackgroundMode,
             crate::domain::pages::BackgroundPosition,
             crate::domain::pages::BackgroundSize,
             crate::domain::sections::ContentBlockType,
@@ -176,7 +177,7 @@ fn swagger_ui_redirect() -> Redirect {
         (name = "Testimonials", description = "Persistent Testimonials Management & Ordering"),
         (name = "Contact Messages", description = "Admin Contact Messages Inbox & Management"),
         (name = "Media", description = "Local File Uploads & YouTube Media"),
-        (name = "Page Appearance", description = "Page appearance, background image, and overlay configuration"),
+        (name = "Page Appearance", description = "Page appearance, background mode, background color, background image, and overlay configuration"),
         (name = "Public", description = "Public Aggregated Website API"),
         (name = "Health", description = "Service Health Checks")
     )

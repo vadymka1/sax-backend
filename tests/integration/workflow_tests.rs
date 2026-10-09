@@ -9,7 +9,7 @@ use spa_sax_backend::application::dto::{
     AdminContactMessageDto, AdminContentBlockDto, AdminMediaDto, AdminPageAppearanceDto,
     AdminSpaSectionDto, PublicMediaDto, PublicPageResponse, UserDto,
 };
-use spa_sax_backend::domain::pages::{BackgroundPosition, BackgroundSize};
+use spa_sax_backend::domain::pages::{BackgroundMode, BackgroundPosition, BackgroundSize};
 use spa_sax_backend::domain::users::Role;
 use spa_sax_backend::infrastructure::auth::{PasswordService, TokenService};
 use spa_sax_backend::shared::pagination::SingleResponse;
@@ -8783,15 +8783,15 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
         migrate_res.err()
     );
 
-    // Verify 0015, 0016, 0017, 0018, 0019, and 0020 are recorded as successfully applied in _sqlx_migrations
+    // Verify 0015, 0016, 0017, 0018, 0019, 0020, and 0021 are recorded as successfully applied in _sqlx_migrations
     let applied_migrations: Vec<(i64, String, bool)> = sqlx::query_as(
-        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18, 19, 20) ORDER BY version ASC",
+        "SELECT version, description, success FROM _sqlx_migrations WHERE version IN (15, 16, 17, 18, 19, 20, 21) ORDER BY version ASC",
     )
     .fetch_all(&harness.pool)
     .await
     .unwrap();
 
-    assert_eq!(applied_migrations.len(), 6);
+    assert_eq!(applied_migrations.len(), 7);
     assert_eq!(applied_migrations[0].0, 15);
     assert_eq!(
         applied_migrations[0].1,
@@ -8821,6 +8821,13 @@ async fn test_sqlx_migration_chain_checksum_and_immutability() {
     assert_eq!(applied_migrations[5].0, 20);
     assert_eq!(applied_migrations[5].1, "page appearance settings");
     assert!(applied_migrations[5].2);
+
+    assert_eq!(applied_migrations[6].0, 21);
+    assert_eq!(
+        applied_migrations[6].1,
+        "page appearance background mode and color"
+    );
+    assert!(applied_migrations[6].2);
 }
 
 #[tokio::test]
@@ -10931,6 +10938,8 @@ async fn test_multilingual_v1_2_public_query_count_bounded() {
 // =========================================================================
 // BACKEND PAGE APPEARANCE V1 TESTS
 // =========================================================================
+// PAGE APPEARANCE INTEGRATION TESTS (V1 & V1.1)
+// =========================================================================
 
 async fn reset_page_appearance_to_defaults(pool: &sqlx::PgPool) {
     let home_id: (Uuid,) = sqlx::query_as("SELECT id FROM pages WHERE slug = 'home'")
@@ -10940,9 +10949,14 @@ async fn reset_page_appearance_to_defaults(pool: &sqlx::PgPool) {
 
     sqlx::query(
         r#"
-        INSERT INTO page_appearance_settings (page_id, background_media_id, overlay_opacity, background_position, background_size, updated_at)
-        VALUES ($1, NULL, 0.35, 'center', 'cover', CURRENT_TIMESTAMP)
+        INSERT INTO page_appearance_settings (
+            page_id, background_mode, background_color, background_media_id,
+            overlay_opacity, background_position, background_size, updated_at
+        )
+        VALUES ($1, 'none', '#FFFFFF', NULL, 0.35, 'center', 'cover', CURRENT_TIMESTAMP)
         ON CONFLICT (page_id) DO UPDATE SET
+            background_mode = 'none',
+            background_color = '#FFFFFF',
             background_media_id = NULL,
             overlay_opacity = 0.35,
             background_position = 'center',
@@ -11078,6 +11092,8 @@ async fn test_page_appearance_defaults_admin_and_public() {
         .await;
     assert_eq!(admin_res.status(), Status::Ok);
     let admin_dto: SingleResponse<AdminPageAppearanceDto> = admin_res.into_json().await.unwrap();
+    assert_eq!(admin_dto.data.background_mode, BackgroundMode::None);
+    assert_eq!(admin_dto.data.background_color, "#FFFFFF");
     assert!(admin_dto.data.background_media.is_none());
     assert_eq!(admin_dto.data.overlay_opacity, 0.35);
     assert_eq!(
@@ -11098,6 +11114,8 @@ async fn test_page_appearance_defaults_admin_and_public() {
         .await;
     assert_eq!(alias_res.status(), Status::Ok);
     let alias_dto: SingleResponse<AdminPageAppearanceDto> = alias_res.into_json().await.unwrap();
+    assert_eq!(alias_dto.data.background_mode, BackgroundMode::None);
+    assert_eq!(alias_dto.data.background_color, "#FFFFFF");
     assert!(alias_dto.data.background_media.is_none());
     assert_eq!(alias_dto.data.overlay_opacity, 0.35);
 
@@ -11105,6 +11123,11 @@ async fn test_page_appearance_defaults_admin_and_public() {
     let pub_res = harness.client.get("/api/v1/public/page").dispatch().await;
     assert_eq!(pub_res.status(), Status::Ok);
     let pub_page: SingleResponse<PublicPageResponse> = pub_res.into_json().await.unwrap();
+    assert_eq!(
+        pub_page.data.appearance.background_mode,
+        BackgroundMode::None
+    );
+    assert_eq!(pub_page.data.appearance.background_color, "#FFFFFF");
     assert!(pub_page.data.appearance.background_media.is_none());
     assert_eq!(pub_page.data.appearance.overlay_opacity, 0.35);
     assert_eq!(
@@ -11126,7 +11149,7 @@ async fn test_page_appearance_assign_image_and_multilingual_consistency() {
     let admin_token = &harness.super_admin_token;
     let (img_id, img_url) = upload_appearance_test_image(&harness, admin_token).await;
 
-    // 1. Assign image via PATCH /api/v1/admin/page-appearance
+    // 1. Assign image with mode image via PATCH /api/v1/admin/page-appearance
     let patch_res = harness
         .client
         .patch("/api/v1/admin/page-appearance")
@@ -11135,11 +11158,12 @@ async fn test_page_appearance_assign_image_and_multilingual_consistency() {
             format!("Bearer {}", admin_token),
         ))
         .header(Header::new("Content-Type", "application/json"))
-        .body(json!({ "background_media_id": img_id }).to_string())
+        .body(json!({ "background_mode": "image", "background_media_id": img_id }).to_string())
         .dispatch()
         .await;
     assert_eq!(patch_res.status(), Status::Ok);
     let patch_dto: SingleResponse<AdminPageAppearanceDto> = patch_res.into_json().await.unwrap();
+    assert_eq!(patch_dto.data.background_mode, BackgroundMode::Image);
     match &patch_dto.data.background_media {
         Some(AdminMediaDto::Image { id, url, .. }) => {
             assert_eq!(*id, img_id);
@@ -11156,6 +11180,10 @@ async fn test_page_appearance_assign_image_and_multilingual_consistency() {
         .await;
     assert_eq!(pub_en_res.status(), Status::Ok);
     let pub_en: SingleResponse<PublicPageResponse> = pub_en_res.into_json().await.unwrap();
+    assert_eq!(
+        pub_en.data.appearance.background_mode,
+        BackgroundMode::Image
+    );
     match &pub_en.data.appearance.background_media {
         Some(PublicMediaDto::Image { id, url, .. }) => {
             assert_eq!(*id, img_id);
@@ -11172,6 +11200,10 @@ async fn test_page_appearance_assign_image_and_multilingual_consistency() {
         .await;
     assert_eq!(pub_de_res.status(), Status::Ok);
     let pub_de: SingleResponse<PublicPageResponse> = pub_de_res.into_json().await.unwrap();
+    assert_eq!(
+        pub_de.data.appearance.background_mode,
+        BackgroundMode::Image
+    );
     match &pub_de.data.appearance.background_media {
         Some(PublicMediaDto::Image { id, url, .. }) => {
             assert_eq!(*id, img_id);
@@ -11179,6 +11211,10 @@ async fn test_page_appearance_assign_image_and_multilingual_consistency() {
         }
         _ => panic!("Expected PublicMediaDto::Image for public DE page"),
     }
+    assert_eq!(
+        pub_en.data.appearance.background_color,
+        pub_de.data.appearance.background_color
+    );
     assert_eq!(
         pub_en.data.appearance.overlay_opacity,
         pub_de.data.appearance.overlay_opacity
@@ -11298,7 +11334,7 @@ async fn test_page_appearance_remove_background_detaches_media() {
     let admin_token = &harness.super_admin_token;
     let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
 
-    // 1. Assign image
+    // 1. Assign image in image mode
     let assign_res = harness
         .client
         .patch("/api/v1/admin/page-appearance")
@@ -11307,13 +11343,13 @@ async fn test_page_appearance_remove_background_detaches_media() {
             format!("Bearer {}", admin_token),
         ))
         .header(Header::new("Content-Type", "application/json"))
-        .body(json!({ "background_media_id": img_id }).to_string())
+        .body(json!({ "background_mode": "image", "background_media_id": img_id }).to_string())
         .dispatch()
         .await;
     assert_eq!(assign_res.status(), Status::Ok);
 
-    // 2. Remove background with explicit null
-    let remove_res = harness
+    // 2. Trying to remove background with null while remaining in mode 'image' MUST fail with 422
+    let invalid_detach = harness
         .client
         .patch("/api/v1/admin/page-appearance")
         .header(Header::new(
@@ -11324,11 +11360,26 @@ async fn test_page_appearance_remove_background_detaches_media() {
         .body(json!({ "background_media_id": null }).to_string())
         .dispatch()
         .await;
+    assert_eq!(invalid_detach.status(), Status::UnprocessableEntity);
+
+    // 3. Remove background with atomic mode switch to 'none' succeeds
+    let remove_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "none", "background_media_id": null }).to_string())
+        .dispatch()
+        .await;
     assert_eq!(remove_res.status(), Status::Ok);
     let remove_dto: SingleResponse<AdminPageAppearanceDto> = remove_res.into_json().await.unwrap();
+    assert_eq!(remove_dto.data.background_mode, BackgroundMode::None);
     assert!(remove_dto.data.background_media.is_none());
 
-    // 3. Verify underlying media asset still exists in media_assets (not deleted)
+    // 4. Verify underlying media asset still exists in media_assets (not deleted)
     let media_exists: Option<(Uuid,)> =
         sqlx::query_as("SELECT id FROM media_assets WHERE id = $1 AND deleted_at IS NULL")
             .bind(img_id)
@@ -11733,4 +11784,524 @@ async fn test_page_appearance_authorization_requirements() {
         .dispatch()
         .await;
     assert_eq!(get_auth.status(), Status::Ok);
+}
+
+#[tokio::test]
+async fn test_page_appearance_migration_backfill_semantics() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    let pool = &harness.pool;
+
+    // Verify migration 0021 backfilled columns properly
+    let row: (String, String) = sqlx::query_as(
+        "SELECT background_mode, background_color FROM page_appearance_settings LIMIT 1",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    assert!(["none", "color", "image"].contains(&row.0.as_str()));
+    assert_eq!(row.1.len(), 7);
+    assert!(row.1.starts_with('#'));
+
+    // Test backfill query directly: row with media -> image, row without media -> none
+    let test_page_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO pages (id, slug, title) VALUES ($1, $2, 'Backfill Test Page')")
+        .bind(test_page_id)
+        .bind(format!("slug_{}", test_page_id.simple()))
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // Insert test row with media
+    sqlx::query(
+        r#"
+        INSERT INTO page_appearance_settings (id, page_id, background_media_id, background_mode, background_color)
+        VALUES ($1, $2, $3, 'none', '#FFFFFF')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(test_page_id)
+    .bind(img_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Run migration backfill logic
+    sqlx::query(
+        r#"
+        UPDATE page_appearance_settings
+        SET background_mode = CASE
+            WHEN background_media_id IS NOT NULL THEN 'image'
+            ELSE 'none'
+        END
+        WHERE page_id = $1
+        "#,
+    )
+    .bind(test_page_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let backfilled_mode: (String,) =
+        sqlx::query_as("SELECT background_mode FROM page_appearance_settings WHERE page_id = $1")
+            .bind(test_page_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+    assert_eq!(backfilled_mode.0, "image");
+
+    // Cleanup
+    sqlx::query("DELETE FROM page_appearance_settings WHERE page_id = $1")
+        .bind(test_page_id)
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM pages WHERE id = $1")
+        .bind(test_page_id)
+        .execute(pool)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_page_appearance_color_validation_and_normalization() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Valid lowercase hex color normalized to uppercase
+    let valid_patch = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_color": "#f4efe8" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(valid_patch.status(), Status::Ok);
+    let valid_dto: SingleResponse<AdminPageAppearanceDto> = valid_patch.into_json().await.unwrap();
+    assert_eq!(valid_dto.data.background_color, "#F4EFE8");
+
+    // 2. Invalid colors rejected with 422
+    let invalid_colors = [
+        "FFFFFF",        // missing #
+        "#FFF",          // 3 chars
+        "#12345G",       // non-hex character
+        "red",           // named CSS color
+        "rgba(0,0,0,1)", // css function
+        "",              // empty string
+        "   ",           // whitespace
+    ];
+
+    for inv in invalid_colors {
+        let inv_patch = harness
+            .client
+            .patch("/api/v1/admin/page-appearance")
+            .header(Header::new(
+                "Authorization",
+                format!("Bearer {}", admin_token),
+            ))
+            .header(Header::new("Content-Type", "application/json"))
+            .body(json!({ "background_color": inv }).to_string())
+            .dispatch()
+            .await;
+        assert_eq!(
+            inv_patch.status(),
+            Status::UnprocessableEntity,
+            "Color '{}' should be rejected with 422",
+            inv
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_page_appearance_mode_enum_validation() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Valid modes 'none' and 'color'
+    for mode in ["color", "none"] {
+        let res = harness
+            .client
+            .patch("/api/v1/admin/page-appearance")
+            .header(Header::new(
+                "Authorization",
+                format!("Bearer {}", admin_token),
+            ))
+            .header(Header::new("Content-Type", "application/json"))
+            .body(json!({ "background_mode": mode }).to_string())
+            .dispatch()
+            .await;
+        assert_eq!(res.status(), Status::Ok);
+        let dto: SingleResponse<AdminPageAppearanceDto> = res.into_json().await.unwrap();
+        assert_eq!(dto.data.background_mode.as_str(), mode);
+    }
+
+    // 2. Invalid modes rejected
+    for inv in ["gradient", "video", "default", "arbitrary"] {
+        let res = harness
+            .client
+            .patch("/api/v1/admin/page-appearance")
+            .header(Header::new(
+                "Authorization",
+                format!("Bearer {}", admin_token),
+            ))
+            .header(Header::new("Content-Type", "application/json"))
+            .body(json!({ "background_mode": inv }).to_string())
+            .dispatch()
+            .await;
+        assert!(
+            res.status() == Status::UnprocessableEntity || res.status() == Status::BadRequest,
+            "Mode '{}' should be rejected",
+            inv
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_page_appearance_mode_color_and_preservation_transitions() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // 1. Switch none -> color with #F4EFE8
+    let patch1 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "color", "background_color": "#F4EFE8" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch1.status(), Status::Ok);
+    let dto1: SingleResponse<AdminPageAppearanceDto> = patch1.into_json().await.unwrap();
+    assert_eq!(dto1.data.background_mode, BackgroundMode::Color);
+    assert_eq!(dto1.data.background_color, "#F4EFE8");
+
+    // 2. Switch color -> none: color is PRESERVED, mode is none
+    let patch2 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "none" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch2.status(), Status::Ok);
+    let dto2: SingleResponse<AdminPageAppearanceDto> = patch2.into_json().await.unwrap();
+    assert_eq!(dto2.data.background_mode, BackgroundMode::None);
+    assert_eq!(dto2.data.background_color, "#F4EFE8");
+
+    // 3. Switch back to color and assign image while mode=color
+    let patch3 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "color", "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch3.status(), Status::Ok);
+    let dto3: SingleResponse<AdminPageAppearanceDto> = patch3.into_json().await.unwrap();
+    assert_eq!(dto3.data.background_mode, BackgroundMode::Color);
+    assert!(dto3.data.background_media.is_some());
+    assert_eq!(dto3.data.background_color, "#F4EFE8");
+
+    // 4. Switch color -> image: succeeds with stored image! Color preserved as fallback/base
+    let patch4 = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "image" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch4.status(), Status::Ok);
+    let dto4: SingleResponse<AdminPageAppearanceDto> = patch4.into_json().await.unwrap();
+    assert_eq!(dto4.data.background_mode, BackgroundMode::Image);
+    assert!(dto4.data.background_media.is_some());
+    assert_eq!(dto4.data.background_color, "#F4EFE8");
+}
+
+#[tokio::test]
+async fn test_page_appearance_image_mode_requires_media() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Initial state has no media. Requesting mode=image MUST fail with 422
+    let res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "image" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::UnprocessableEntity);
+
+    // 2. Assign image, then archive media asset in database
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+    let assign_res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "color", "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(assign_res.status(), Status::Ok);
+
+    // Archive media
+    sqlx::query("UPDATE media_assets SET status = 'archived' WHERE id = $1")
+        .bind(img_id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    // Now trying to switch to mode=image with non-active media MUST fail with 422
+    let switch_archived = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "image" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(switch_archived.status(), Status::UnprocessableEntity);
+}
+
+#[tokio::test]
+async fn test_page_appearance_atomic_transactionality_and_final_state() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+
+    // 1. Existing color is #FFFFFF. PATCH with invalid media + new color #F4EFE8
+    let inv_id = Uuid::new_v4();
+    let res = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_color": "#F4EFE8", "background_media_id": inv_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(res.status(), Status::NotFound);
+
+    // Assert color remained #FFFFFF (atomic rollback)
+    let check_res = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    let check_dto: SingleResponse<AdminPageAppearanceDto> = check_res.into_json().await.unwrap();
+    assert_eq!(check_dto.data.background_color, "#FFFFFF");
+
+    // 2. Setup mode=image with valid image
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+    let setup = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "image", "background_media_id": img_id, "overlay_opacity": 0.35 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(setup.status(), Status::Ok);
+
+    // 3. Trying to detach media while keeping mode=image (with opacity change) MUST fail atomically
+    let invalid_patch = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_media_id": null, "overlay_opacity": 0.8 }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(invalid_patch.status(), Status::UnprocessableEntity);
+
+    // Assert opacity was NOT updated to 0.8 and media was NOT removed
+    let check_res2 = harness
+        .client
+        .get("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .dispatch()
+        .await;
+    let check_dto2: SingleResponse<AdminPageAppearanceDto> = check_res2.into_json().await.unwrap();
+    assert_eq!(check_dto2.data.overlay_opacity, 0.35);
+    assert_eq!(check_dto2.data.background_mode, BackgroundMode::Image);
+    assert!(check_dto2.data.background_media.is_some());
+
+    // 4. Combined switch mode to color + detach media is valid
+    let valid_switch = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "color", "background_media_id": null }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(valid_switch.status(), Status::Ok);
+    let check_dto3: SingleResponse<AdminPageAppearanceDto> =
+        valid_switch.into_json().await.unwrap();
+    assert_eq!(check_dto3.data.background_mode, BackgroundMode::Color);
+    assert!(check_dto3.data.background_media.is_none());
+}
+
+#[tokio::test]
+async fn test_page_appearance_public_page_modes_and_multilingual_consistency() {
+    let _lock = DB_LOCK.lock().await;
+    let harness = TestHarness::new().await;
+    reset_page_appearance_to_defaults(&harness.pool).await;
+
+    let admin_token = &harness.super_admin_token;
+    let (img_id, _) = upload_appearance_test_image(&harness, admin_token).await;
+
+    // 1. Configure Color mode: background_mode = color, background_color = #F4EFE8
+    let patch_color = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "color", "background_color": "#F4EFE8" }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch_color.status(), Status::Ok);
+
+    // Call EN and DE public endpoints
+    let pub_en = harness
+        .client
+        .get("/api/v1/public/page?locale=en")
+        .dispatch()
+        .await;
+    assert_eq!(pub_en.status(), Status::Ok);
+    let dto_en: SingleResponse<PublicPageResponse> = pub_en.into_json().await.unwrap();
+
+    let pub_de = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    assert_eq!(pub_de.status(), Status::Ok);
+    let dto_de: SingleResponse<PublicPageResponse> = pub_de.into_json().await.unwrap();
+
+    assert_eq!(
+        dto_en.data.appearance.background_mode,
+        BackgroundMode::Color
+    );
+    assert_eq!(dto_en.data.appearance.background_color, "#F4EFE8");
+    assert_eq!(
+        dto_de.data.appearance.background_mode,
+        BackgroundMode::Color
+    );
+    assert_eq!(dto_de.data.appearance.background_color, "#F4EFE8");
+    assert_eq!(
+        dto_en.data.appearance.overlay_opacity,
+        dto_de.data.appearance.overlay_opacity
+    );
+
+    // 2. Configure Image mode with stored color #F4EFE8
+    let patch_image = harness
+        .client
+        .patch("/api/v1/admin/page-appearance")
+        .header(Header::new(
+            "Authorization",
+            format!("Bearer {}", admin_token),
+        ))
+        .header(Header::new("Content-Type", "application/json"))
+        .body(json!({ "background_mode": "image", "background_media_id": img_id }).to_string())
+        .dispatch()
+        .await;
+    assert_eq!(patch_image.status(), Status::Ok);
+
+    let pub_img_en = harness
+        .client
+        .get("/api/v1/public/page?locale=en")
+        .dispatch()
+        .await;
+    let dto_img_en: SingleResponse<PublicPageResponse> = pub_img_en.into_json().await.unwrap();
+
+    let pub_img_de = harness
+        .client
+        .get("/api/v1/public/page?locale=de")
+        .dispatch()
+        .await;
+    let dto_img_de: SingleResponse<PublicPageResponse> = pub_img_de.into_json().await.unwrap();
+
+    assert_eq!(
+        dto_img_en.data.appearance.background_mode,
+        BackgroundMode::Image
+    );
+    assert_eq!(dto_img_en.data.appearance.background_color, "#F4EFE8");
+    assert!(dto_img_en.data.appearance.background_media.is_some());
+    assert_eq!(
+        dto_img_de.data.appearance.background_mode,
+        BackgroundMode::Image
+    );
+    assert_eq!(dto_img_de.data.appearance.background_color, "#F4EFE8");
+    assert!(dto_img_de.data.appearance.background_media.is_some());
 }

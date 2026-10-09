@@ -2,13 +2,17 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::domain::pages::{BackgroundPosition, BackgroundSize, PageAppearanceSettings};
+use crate::domain::pages::{
+    BackgroundMode, BackgroundPosition, BackgroundSize, PageAppearanceSettings,
+};
 use crate::shared::errors::{AppError, AppResult};
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct AppearanceWithMediaRow {
     pub id: Uuid,
     pub page_id: Uuid,
+    pub background_mode: String,
+    pub background_color: String,
     pub overlay_opacity: f64,
     pub background_position: String,
     pub background_size: String,
@@ -26,6 +30,8 @@ pub struct AppearanceWithMediaRow {
 struct SettingsRow {
     id: Uuid,
     page_id: Uuid,
+    background_mode: String,
+    background_color: String,
     background_media_id: Option<Uuid>,
     overlay_opacity: f64,
     background_position: String,
@@ -36,6 +42,17 @@ struct SettingsRow {
 
 pub struct PageAppearanceRepository<'a> {
     pool: &'a PgPool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertAppearanceParams<'a> {
+    pub page_id: Uuid,
+    pub background_mode: BackgroundMode,
+    pub background_color: &'a str,
+    pub background_media_id: Option<Uuid>,
+    pub overlay_opacity: f64,
+    pub background_position: BackgroundPosition,
+    pub background_size: BackgroundSize,
 }
 
 impl<'a> PageAppearanceRepository<'a> {
@@ -51,6 +68,8 @@ impl<'a> PageAppearanceRepository<'a> {
             SELECT 
                 pas.id,
                 pas.page_id,
+                pas.background_mode,
+                pas.background_color,
                 pas.overlay_opacity,
                 pas.background_position,
                 pas.background_size,
@@ -82,7 +101,7 @@ impl<'a> PageAppearanceRepository<'a> {
     ) -> AppResult<Option<PageAppearanceSettings>> {
         let row = sqlx::query_as::<_, SettingsRow>(
             r#"
-            SELECT id, page_id, background_media_id, overlay_opacity, background_position, background_size, created_at, updated_at
+            SELECT id, page_id, background_mode, background_color, background_media_id, overlay_opacity, background_position, background_size, created_at, updated_at
             FROM page_appearance_settings
             WHERE page_id = $1
             "#,
@@ -95,6 +114,8 @@ impl<'a> PageAppearanceRepository<'a> {
         Ok(row.map(|r| PageAppearanceSettings {
             id: r.id,
             page_id: r.page_id,
+            background_mode: BackgroundMode::parse(&r.background_mode).unwrap_or_default(),
+            background_color: r.background_color,
             background_media_id: r.background_media_id,
             overlay_opacity: r.overlay_opacity,
             background_position: BackgroundPosition::parse(&r.background_position)
@@ -108,30 +129,32 @@ impl<'a> PageAppearanceRepository<'a> {
     /// Atomically upserts the page appearance settings record.
     pub async fn upsert(
         &self,
-        page_id: Uuid,
-        background_media_id: Option<Uuid>,
-        overlay_opacity: f64,
-        background_position: BackgroundPosition,
-        background_size: BackgroundSize,
+        params: UpsertAppearanceParams<'_>,
     ) -> AppResult<PageAppearanceSettings> {
         let row = sqlx::query_as::<_, SettingsRow>(
             r#"
-            INSERT INTO page_appearance_settings (page_id, background_media_id, overlay_opacity, background_position, background_size, updated_at)
-            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+            INSERT INTO page_appearance_settings (
+                page_id, background_mode, background_color, background_media_id, overlay_opacity, background_position, background_size, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
             ON CONFLICT (page_id) DO UPDATE SET
+                background_mode = EXCLUDED.background_mode,
+                background_color = EXCLUDED.background_color,
                 background_media_id = EXCLUDED.background_media_id,
                 overlay_opacity = EXCLUDED.overlay_opacity,
                 background_position = EXCLUDED.background_position,
                 background_size = EXCLUDED.background_size,
                 updated_at = CURRENT_TIMESTAMP
-            RETURNING id, page_id, background_media_id, overlay_opacity, background_position, background_size, created_at, updated_at
+            RETURNING id, page_id, background_mode, background_color, background_media_id, overlay_opacity, background_position, background_size, created_at, updated_at
             "#,
         )
-        .bind(page_id)
-        .bind(background_media_id)
-        .bind(overlay_opacity)
-        .bind(background_position.as_str())
-        .bind(background_size.as_str())
+        .bind(params.page_id)
+        .bind(params.background_mode.as_str())
+        .bind(params.background_color)
+        .bind(params.background_media_id)
+        .bind(params.overlay_opacity)
+        .bind(params.background_position.as_str())
+        .bind(params.background_size.as_str())
         .fetch_one(self.pool)
         .await
         .map_err(|e| AppError::DatabaseError(e.to_string()))?;
@@ -139,6 +162,8 @@ impl<'a> PageAppearanceRepository<'a> {
         Ok(PageAppearanceSettings {
             id: row.id,
             page_id: row.page_id,
+            background_mode: BackgroundMode::parse(&row.background_mode).unwrap_or_default(),
+            background_color: row.background_color,
             background_media_id: row.background_media_id,
             overlay_opacity: row.overlay_opacity,
             background_position: BackgroundPosition::parse(&row.background_position)

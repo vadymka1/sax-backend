@@ -49,9 +49,11 @@ pub async fn get_home_page_appearance_alias(
 /// Update page appearance settings
 ///
 /// Partially updates the appearance configuration for the public SPA home page.
-/// Supports assigning background image (`background_media_id`), detaching background image (`background_media_id: null`),
+/// Supports setting explicit background mode (`background_mode`: "none" | "color" | "image"),
+/// configuring solid hex background color (`background_color`: "#RRGGBB"),
+/// assigning background image (`background_media_id`), detaching background image (`background_media_id: null`),
 /// adjusting overlay opacity (0.0 to 1.0), and configuring position ("center" | "top" | "bottom") and size ("cover" | "contain").
-/// Background media MUST be an active image asset (videos and youtube references are rejected).
+/// Background mode "image" strictly requires an active image media asset (videos and youtube references are rejected).
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/page-appearance",

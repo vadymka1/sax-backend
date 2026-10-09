@@ -1369,9 +1369,47 @@ mod tests {
     fn test_page_appearance_enums_and_defaults() {
         use spa_sax_backend::application::dto::UpdatePageAppearanceRequest;
         use spa_sax_backend::domain::pages::{
-            BackgroundPosition, BackgroundSize, PageAppearanceSettings,
+            validate_and_normalize_hex_color, BackgroundMode, BackgroundPosition, BackgroundSize,
+            PageAppearanceSettings,
         };
         use uuid::Uuid;
+
+        // Verify BackgroundMode
+        assert_eq!(BackgroundMode::default(), BackgroundMode::None);
+        assert_eq!(BackgroundMode::None.as_str(), "none");
+        assert_eq!(BackgroundMode::Color.as_str(), "color");
+        assert_eq!(BackgroundMode::Image.as_str(), "image");
+        assert_eq!(BackgroundMode::parse("none"), Some(BackgroundMode::None));
+        assert_eq!(BackgroundMode::parse("color"), Some(BackgroundMode::Color));
+        assert_eq!(BackgroundMode::parse("image"), Some(BackgroundMode::Image));
+        assert_eq!(BackgroundMode::parse("gradient"), None);
+        assert_eq!(BackgroundMode::parse("invalid"), None);
+
+        // Verify validate_and_normalize_hex_color
+        assert_eq!(
+            validate_and_normalize_hex_color("#ffffff").unwrap(),
+            "#FFFFFF"
+        );
+        assert_eq!(
+            validate_and_normalize_hex_color("#f4efe8").unwrap(),
+            "#F4EFE8"
+        );
+        assert_eq!(
+            validate_and_normalize_hex_color("#000000").unwrap(),
+            "#000000"
+        );
+        assert_eq!(
+            validate_and_normalize_hex_color(" #1a2b3c ").unwrap(),
+            "#1A2B3C"
+        );
+        // Invalid colors
+        assert!(validate_and_normalize_hex_color("FFFFFF").is_err());
+        assert!(validate_and_normalize_hex_color("#FFF").is_err());
+        assert!(validate_and_normalize_hex_color("#12345G").is_err());
+        assert!(validate_and_normalize_hex_color("red").is_err());
+        assert!(validate_and_normalize_hex_color("rgba(0,0,0,1)").is_err());
+        assert!(validate_and_normalize_hex_color("").is_err());
+        assert!(validate_and_normalize_hex_color("   ").is_err());
 
         // Verify BackgroundPosition
         assert_eq!(BackgroundPosition::default(), BackgroundPosition::Center);
@@ -1405,6 +1443,8 @@ mod tests {
 
         // Verify PageAppearanceSettings defaults
         let def = PageAppearanceSettings::default();
+        assert_eq!(def.background_mode, BackgroundMode::None);
+        assert_eq!(def.background_color, "#FFFFFF");
         assert_eq!(def.overlay_opacity, 0.35);
         assert_eq!(def.background_position, BackgroundPosition::Center);
         assert_eq!(def.background_size, BackgroundSize::Cover);
@@ -1413,6 +1453,8 @@ mod tests {
         // Verify UpdatePageAppearanceRequest partial serde
         // 1. Omitted fields
         let req1: UpdatePageAppearanceRequest = serde_json::from_str("{}").unwrap();
+        assert!(req1.background_mode.is_none());
+        assert!(req1.background_color.is_none());
         assert!(req1.background_media_id.is_none());
         assert!(req1.overlay_opacity.is_none());
         assert!(req1.background_position.is_none());
@@ -1423,12 +1465,14 @@ mod tests {
             serde_json::from_str(r#"{"background_media_id": null}"#).unwrap();
         assert_eq!(req2.background_media_id, Some(None));
 
-        // 3. Explicit media UUID assignment
+        // 3. Explicit values
         let test_uuid = Uuid::new_v4();
         let json_with_id = format!(
-            r#"{{"background_media_id": "{test_uuid}", "overlay_opacity": 0.8, "background_position": "top", "background_size": "contain"}}"#
+            r##"{{"background_mode": "image", "background_color": "#F4EFE8", "background_media_id": "{test_uuid}", "overlay_opacity": 0.8, "background_position": "top", "background_size": "contain"}}"##
         );
         let req3: UpdatePageAppearanceRequest = serde_json::from_str(&json_with_id).unwrap();
+        assert_eq!(req3.background_mode, Some(BackgroundMode::Image));
+        assert_eq!(req3.background_color, Some("#F4EFE8".to_string()));
         assert_eq!(req3.background_media_id, Some(Some(test_uuid)));
         assert_eq!(req3.overlay_opacity, Some(0.8));
         assert_eq!(req3.background_position, Some(BackgroundPosition::Top));
@@ -1451,6 +1495,7 @@ mod tests {
             "AdminPageAppearanceDto",
             "PublicPageAppearanceDto",
             "UpdatePageAppearanceRequest",
+            "BackgroundMode",
             "BackgroundPosition",
             "BackgroundSize",
             "PublicPageResponse",
@@ -1471,9 +1516,11 @@ mod tests {
             "PublicPageResponse schema must contain 'appearance' property"
         );
 
-        // Verify AdminPageAppearanceDto schema includes background_media, overlay_opacity, background_position, background_size
+        // Verify AdminPageAppearanceDto schema includes background_mode, background_color, background_media, overlay_opacity, background_position, background_size
         let admin_dto_schema = schemas.get("AdminPageAppearanceDto").unwrap();
         let admin_dto_json = serde_json::to_string(admin_dto_schema).unwrap();
+        assert!(admin_dto_json.contains("background_mode"));
+        assert!(admin_dto_json.contains("background_color"));
         assert!(admin_dto_json.contains("background_media"));
         assert!(admin_dto_json.contains("overlay_opacity"));
         assert!(admin_dto_json.contains("background_position"));

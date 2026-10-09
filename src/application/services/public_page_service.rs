@@ -10,7 +10,7 @@ use crate::application::dto::{
 };
 use crate::domain::locale::Locale;
 use crate::domain::media::YoutubeUrlParser;
-use crate::domain::pages::{BackgroundPosition, BackgroundSize};
+use crate::domain::pages::{BackgroundMode, BackgroundPosition, BackgroundSize};
 use crate::domain::sections::{ContentBlockType, FontFamily, FontSize};
 use crate::infrastructure::storage::StorageProvider;
 use crate::shared::errors::{AppError, AppResult};
@@ -39,6 +39,8 @@ impl PublicPageService {
             seo_title: Option<String>,
             seo_description: Option<String>,
             seo_keywords: Option<Vec<String>>,
+            background_mode: Option<String>,
+            background_color: Option<String>,
             overlay_opacity: Option<f64>,
             background_position: Option<String>,
             background_size: Option<String>,
@@ -91,6 +93,7 @@ impl PublicPageService {
             r#"
             SELECT 
                 p.id, p.slug, p.title, p.seo_title, p.seo_description, p.seo_keywords,
+                pas.background_mode, pas.background_color,
                 pas.overlay_opacity, pas.background_position, pas.background_size,
                 m.id AS bg_media_id, m.media_type AS bg_media_type, m.storage_key AS bg_storage_key, m.alt_text AS bg_alt_text
             FROM pages p
@@ -132,6 +135,14 @@ impl PublicPageService {
         };
 
         let appearance_dto = PublicPageAppearanceDto {
+            background_mode: page_row
+                .background_mode
+                .as_deref()
+                .and_then(BackgroundMode::parse)
+                .unwrap_or(BackgroundMode::None),
+            background_color: page_row
+                .background_color
+                .unwrap_or_else(|| "#FFFFFF".to_string()),
             background_media,
             overlay_opacity: page_row.overlay_opacity.unwrap_or(0.35),
             background_position: page_row
